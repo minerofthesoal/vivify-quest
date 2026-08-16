@@ -1,0 +1,233 @@
+#include "main.hpp"
+#include "VivifyRuntime.hpp"
+#include <string_view>
+#include <fstream>
+#include <mutex>
+#include <filesystem>
+#include "HMUI/ViewController.hpp"
+#include "UnityEngine/GameObject.hpp"
+#include "UnityEngine/Transform.hpp"
+#include "bsml/shared/BSML-Lite/Creation/Layout.hpp"
+#include "bsml/shared/BSML-Lite/Creation/Settings.hpp"
+#include "bsml/shared/BSML/Settings/BSMLSettings.hpp"
+#include "custom-types/shared/register.hpp"
+#include "scotland2/shared/modloader.h"
+
+static modloader::ModInfo modInfo{MOD_ID, VERSION, 0};
+
+namespace {
+constexpr std::string_view kMultipassRenderingConfigKey = "multipassRendering";
+constexpr std::string_view kVivifyDebugLoggingConfigKey = "vivifyDebugLogging";
+constexpr std::string_view kDisableBeat0FilmgrainBlitConfigKey = "disableBeat0FilmgrainBlit";
+constexpr std::string_view kDisableAllBlitsConfigKey = "disableAllBlits";
+constexpr std::string_view kDisableCreateCameraDepthConfigKey = "disableCreateCameraDepth";
+// Ported from the rbatteries1-design/Lars27110 base.
+constexpr std::string_view kDisableCustomNoteVisualsConfigKey = "disableCustomNoteVisuals";
+constexpr std::string_view kDisableVisualsInMultiplayerConfigKey = "disableVisualsInMultiplayer";
+constexpr std::string_view kDisableVRCenterAdjustConfigKey = "disableVRCenterAdjust";
+constexpr std::string_view kAllowUnsafeWindowsBundleFallbackConfigKey = "allowUnsafeWindowsBundleFallback";
+bool gMultipassRenderingEnabled = true;
+bool gVivifyDebugLogging = false;
+bool gDisableBeat0FilmgrainBlit = false;
+bool gDisableAllBlits = false;
+bool gDisableCreateCameraDepth = false;
+bool gDisableCustomNoteVisuals = false;
+// Defaults to true, matching the base this was ported from: Vivify's world-space
+// note/saber/debris replacements aren't validated for multiplayer lobbies, so they
+// stay off there unless the player opts back in.
+bool gDisableVisualsInMultiplayer = true;
+bool gDisableVRCenterAdjust = false;
+// Off by default (deviates from the base's hardcoded-on behavior): loading a
+// Windows-built AssetBundle on Quest is unsupported by Unity and can crash instead
+// of just failing to load, so this stays an explicit opt-in here.
+bool gAllowUnsafeWindowsBundleFallback = false;
+
+constexpr std::string_view kVivifyLogDir = "/sdcard/ModData/com.beatgames.beatsaber/Logs";
+constexpr std::string_view kVivifyLogPath = "/sdcard/ModData/com.beatgames.beatsaber/Logs/Vivify.log";
+std::ofstream gVivifyLogFile;
+std::mutex gVivifyLogMutex;
+bool gVivifyLogSinkInstalled = false;
+
+void InstallVivifyFileLogSink() {
+  if (gVivifyLogSinkInstalled) return;
+  gVivifyLogSinkInstalled = true;
+  std::error_code ec;
+  std::filesystem::create_directories(std::string(kVivifyLogDir), ec);
+
+  gVivifyLogFile.open(std::string(kVivifyLogPath), std::ios::out | std::ios::trunc);
+  if (!gVivifyLogFile.is_open()) {
+    PaperLogger.warn("Vivify: could not open log file at {} (logging to logcat only)", kVivifyLogPath);
+    return;
+  }
+  gVivifyLogFile << "=== Vivify " << VERSION << " session log ===\n";
+  gVivifyLogFile.flush();
+
+  Paper::Logger::AddLogSink([](Paper::LogData const& data) {
+    if (!data.tag.has_value() || *data.tag != std::string_view(MOD_ID)) return;
+    std::lock_guard<std::mutex> lock(gVivifyLogMutex);
+    if (!gVivifyLogFile.is_open()) return;
+    gVivifyLogFile << '[' << Paper::format_as(data.level) << "] " << data.message << '\n';
+    gVivifyLogFile.flush();
+  });
+}
+
+void EnsureConfigObject() {
+  auto& doc = getConfig().config;
+  if (!doc.IsObject()) {
+    doc.SetObject();
+  }
+}
+
+bool EnsureBoolConfigValue(std::string_view key, bool defaultValue, bool& value) {
+  auto& doc = getConfig().config;
+  auto it = doc.FindMember(key.data());
+  if (it != doc.MemberEnd() && it->value.IsBool()) {
+    value = it->value.GetBool();
+    return false;
+  }
+
+  auto& allocator = doc.GetAllocator();
+  value = defaultValue;
+  if (it == doc.MemberEnd()) {
+    doc.AddMember(rapidjson::Value(key.data(), allocator), rapidjson::Value(defaultValue), allocator);
+  } else {
+    it->value.SetBool(defaultValue);
+  }
+  return true;
+}
+
+void SetBoolConfigValue(std::string_view key, bool enabled, bool& value) {
+  auto& config = getConfig();
+  auto& doc = config.config;
+  EnsureConfigObject();
+  auto& allocator = doc.GetAllocator();
+  auto it = doc.FindMember(key.data());
+  if (it == doc.MemberEnd()) {
+    doc.AddMember(rapidjson::Value(key.data(), allocator), rapidjson::Value(enabled), allocator);
+  } else {
+    it->value.SetBool(enabled);
+  }
+  value = enabled;
+  config.Write();
+}
+
+void RegisterModSettings() {
+  BSML::BSMLSettings::get_instance()->TryAddSettingsMenu(
+      [](HMUI::ViewController* viewController, bool firstActivation, bool, bool) {
+        if (!firstActivation || viewController == nullptr) return;
+        auto* container = BSML::Lite::CreateScrollableSettingsContainer(viewController->get_transform());
+        if (container == nullptr) return;
+        BSML::Lite::CreateToggle(
+            container->get_transform(), u"Debug logging", GetVivifyDebugLogging(),
+            [](bool value) { SetBoolConfigValue(kVivifyDebugLoggingConfigKey, value, gVivifyDebugLogging); });
+        BSML::Lite::CreateToggle(
+            container->get_transform(), u"Multipass Rendering", GetMultipassRenderingEnabled(),
+            [](bool value) { SetBoolConfigValue(kMultipassRenderingConfigKey, value, gMultipassRenderingEnabled); });
+        BSML::Lite::CreateToggle(
+            container->get_transform(), u"Disable Beat 0 Filmgrain Blit", GetDisableBeat0FilmgrainBlit(),
+            [](bool value) { SetBoolConfigValue(kDisableBeat0FilmgrainBlitConfigKey, value, gDisableBeat0FilmgrainBlit); });
+        BSML::Lite::CreateToggle(
+            container->get_transform(), u"Disable All Blits", GetDisableAllBlits(),
+            [](bool value) { SetBoolConfigValue(kDisableAllBlitsConfigKey, value, gDisableAllBlits); });
+        BSML::Lite::CreateToggle(
+            container->get_transform(), u"Disable CreateCamera Depth", GetDisableCreateCameraDepth(),
+            [](bool value) { SetBoolConfigValue(kDisableCreateCameraDepthConfigKey, value, gDisableCreateCameraDepth); });
+        BSML::Lite::CreateToggle(
+            container->get_transform(), u"Disable Custom Note Visuals", GetDisableCustomNoteVisuals(),
+            [](bool value) { SetBoolConfigValue(kDisableCustomNoteVisualsConfigKey, value, gDisableCustomNoteVisuals); });
+        BSML::Lite::CreateToggle(
+            container->get_transform(), u"Disable Vivify Visuals In Multiplayer", GetDisableVisualsInMultiplayer(),
+            [](bool value) { SetBoolConfigValue(kDisableVisualsInMultiplayerConfigKey, value, gDisableVisualsInMultiplayer); });
+        BSML::Lite::CreateToggle(
+            container->get_transform(), u"Disable VR Center Adjust Handling", GetDisableVRCenterAdjust(),
+            [](bool value) { SetBoolConfigValue(kDisableVRCenterAdjustConfigKey, value, gDisableVRCenterAdjust); });
+        BSML::Lite::CreateToggle(
+            container->get_transform(), u"Allow Unsafe Windows Bundle Fallback (risky)",
+            GetAllowUnsafeWindowsBundleFallback(),
+            [](bool value) {
+              SetBoolConfigValue(kAllowUnsafeWindowsBundleFallbackConfigKey, value, gAllowUnsafeWindowsBundleFallback);
+            });
+      },
+      "Vivify", false);
+}
+}
+
+Configuration &getConfig() {
+  static Configuration config(modInfo);
+  return config;
+}
+
+bool GetMultipassRenderingEnabled() {
+  return gMultipassRenderingEnabled;
+}
+
+bool GetVivifyDebugLogging() {
+  return gVivifyDebugLogging;
+}
+
+bool GetDisableBeat0FilmgrainBlit() {
+  return gDisableBeat0FilmgrainBlit;
+}
+
+bool GetDisableAllBlits() {
+  return gDisableAllBlits;
+}
+
+bool GetDisableCreateCameraDepth() {
+  return gDisableCreateCameraDepth;
+}
+
+bool GetDisableCustomNoteVisuals() {
+  return gDisableCustomNoteVisuals;
+}
+
+bool GetDisableVisualsInMultiplayer() {
+  return gDisableVisualsInMultiplayer;
+}
+
+bool GetDisableVRCenterAdjust() {
+  return gDisableVRCenterAdjust;
+}
+
+bool GetAllowUnsafeWindowsBundleFallback() {
+  return gAllowUnsafeWindowsBundleFallback;
+}
+
+void EnsureConfigDefaults() {
+  auto& config = getConfig();
+  auto& doc = config.config;
+  EnsureConfigObject();
+  bool needsWrite = false;
+
+  needsWrite |= EnsureBoolConfigValue(kMultipassRenderingConfigKey, false, gMultipassRenderingEnabled);
+
+  needsWrite |= EnsureBoolConfigValue(kVivifyDebugLoggingConfigKey, false, gVivifyDebugLogging);
+  needsWrite |= EnsureBoolConfigValue(kDisableBeat0FilmgrainBlitConfigKey, false, gDisableBeat0FilmgrainBlit);
+  needsWrite |= EnsureBoolConfigValue(kDisableAllBlitsConfigKey, false, gDisableAllBlits);
+  needsWrite |= EnsureBoolConfigValue(kDisableCreateCameraDepthConfigKey, false, gDisableCreateCameraDepth);
+  needsWrite |= EnsureBoolConfigValue(kDisableCustomNoteVisualsConfigKey, false, gDisableCustomNoteVisuals);
+  needsWrite |= EnsureBoolConfigValue(kDisableVisualsInMultiplayerConfigKey, true, gDisableVisualsInMultiplayer);
+  needsWrite |= EnsureBoolConfigValue(kDisableVRCenterAdjustConfigKey, false, gDisableVRCenterAdjust);
+  needsWrite |= EnsureBoolConfigValue(kAllowUnsafeWindowsBundleFallbackConfigKey, false, gAllowUnsafeWindowsBundleFallback);
+  if (needsWrite) {
+    config.Write();
+  }
+}
+
+MOD_EXTERN_FUNC void setup(CModInfo *info) noexcept {
+  *info = modInfo.to_c();
+  InstallVivifyFileLogSink();
+  getConfig().Load();
+  EnsureConfigDefaults();
+  // Note: gMultipassRenderingEnabled / gVivifyDebugLogging are intentionally NOT
+  // reset here. EnsureConfigDefaults() above already loaded the saved values (or
+  // wrote the defaults on first run); hardcoding them back to a fixed value here
+  // would silently discard the player's saved settings-menu choice on every launch.
+  PaperLogger.info("Vivify file logging active -> {}", kVivifyLogPath);
+}
+MOD_EXTERN_FUNC void late_load() noexcept {
+  il2cpp_functions::Init();
+  custom_types::Register::AutoRegister();
+  RegisterModSettings();
+  Vivify::LateLoad();
+}
