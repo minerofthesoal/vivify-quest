@@ -1,0 +1,71 @@
+name: Build Quest Mod
+
+on:
+  push:
+    branches: [ main, master ]
+    tags:
+      - 'v*'
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+      with:
+        submodules: true
+
+    - name: QPM Action
+      id: qpm
+      uses: Fernthedev/qpm-action@v1
+      with:
+        workflow_token: ${{ secrets.GITHUB_TOKEN }}
+        restore: true
+        cache: true
+        resolve_ndk: true
+
+    - name: Build
+      run: qpm s build
+
+    - name: Create QMOD
+      run: qpm s qmod
+
+    - name: Read mod version
+      id: mod_version
+      run: |
+        VERSION=$(python3 -c "import json; print(json.load(open('mod.json'))['version'])")
+        echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+    - name: Rename QMOD artifact
+      run: |
+        for f in ./*.qmod; do
+          mv "$f" "./Vivify-v${{ steps.mod_version.outputs.version }}.qmod"
+        done
+
+    - name: Upload Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: Vivify-v${{ steps.mod_version.outputs.version }}
+        path: ./*.qmod
+        if-no-files-found: error
+
+    - name: Publish Release
+      if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+      uses: softprops/action-gh-release@v2
+      with:
+        name: Vivify ${{ steps.mod_version.outputs.version }}
+        generate_release_notes: true
+        body: |
+          Personal Quest build of Vivify (merge of axo-lotl/Vivifhy-Quest,
+          rbatteries1-design/Vivify-Quest-Port, and Lars27110/Vivify-Quest —
+          see README for what was merged from each).
+
+          Built automatically from tag `${{ github.ref_name }}`.
+        files: ./*.qmod
