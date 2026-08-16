@@ -121,9 +121,6 @@ void RegisterModSettings() {
             container->get_transform(), u"Debug logging", GetVivifyDebugLogging(),
             [](bool value) { SetBoolConfigValue(kVivifyDebugLoggingConfigKey, value, gVivifyDebugLogging); });
         BSML::Lite::CreateToggle(
-            container->get_transform(), u"Multipass Rendering", GetMultipassRenderingEnabled(),
-            [](bool value) { SetBoolConfigValue(kMultipassRenderingConfigKey, value, gMultipassRenderingEnabled); });
-        BSML::Lite::CreateToggle(
             container->get_transform(), u"Disable Beat 0 Filmgrain Blit", GetDisableBeat0FilmgrainBlit(),
             [](bool value) { SetBoolConfigValue(kDisableBeat0FilmgrainBlitConfigKey, value, gDisableBeat0FilmgrainBlit); });
         BSML::Lite::CreateToggle(
@@ -158,7 +155,23 @@ Configuration &getConfig() {
 }
 
 bool GetMultipassRenderingEnabled() {
-  return gMultipassRenderingEnabled;
+  // Hard-disabled regardless of gMultipassRenderingEnabled / the stored config
+  // value. When enabled, MultipassKeywordController::OnPreRender() (see
+  // VivifyComponents.cpp) calls Shader::SetGlobalInt("_StereoActiveEye", eye)
+  // every frame a level is active, using Camera::get_stereoActiveEye(). That
+  // value is only meaningful under legacy multi-pass XR rendering; Quest
+  // renders single-pass-instanced, so this writes a near-arbitrary value into
+  // a GLOBAL shader property that isn't scoped to Vivify's own materials --
+  // any other shader reading it (note materials, UI/menu shaders, saber and
+  // arc effects) gets corrupted for as long as a level is active, including
+  // while paused. That's what was causing notes to go invisible after
+  // entering a level and arcs/saber effects/menus to go invisible in some
+  // levels. Confirmed by removing the initializer/EnsureConfigDefaults default
+  // mismatch that let a stale or manually-enabled config value take effect;
+  // the previous ref1 base avoided this entirely by hardcoding it off. Leave
+  // this hardcoded false until MultipassKeywordController is actually fixed
+  // for single-pass-instanced rendering and verified on-device.
+  return false;
 }
 
 bool GetVivifyDebugLogging() {
