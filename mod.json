@@ -5,7 +5,7 @@
   "id": "vivify",
   "modloader": "Scotland2",
   "author": "Rayla (merge of axo-lotl/Vivifhy-Quest, Braxed's Vivify-Quest-Port, and Lars27110's Vivify-Quest)",
-  "version": "0.4.1-rayla.1",
+  "version": "0.4.2",
   "packageId": "com.beatgames.beatsaber",
   "packageVersion": "1.40.8_7379",
   "description": "Personal Quest port of Vivify for Beat Saber, built on axo-lotl's CameraEvent-accurate rendering with the level-selection/bundle-fallback and note-visual-layer fixes merged in from Braxed's and Lars27110's ports.",
