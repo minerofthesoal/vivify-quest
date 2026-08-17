@@ -56,7 +56,7 @@ public:
   bool IsReduceDebrisEnabled();
   void PushActiveDebrisPrefabs(std::vector<AssignedPrefabInfo*> infos);
   void PopActiveDebrisPrefabs();
-  void ApplyNotePrefabFor(GlobalNamespace::NoteController* noteController);
+  void ApplyNotePrefabFor(GlobalNamespace::NoteController* noteController, bool isFreshInit = true);
   void RestoreNoteVisuals(GlobalNamespace::NoteController* noteController);
   void RestoreDebrisVisuals(GlobalNamespace::NoteDebris* debris);
   void RestoreSaberVisuals(GlobalNamespace::SaberModelController* smc);

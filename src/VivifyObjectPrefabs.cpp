@@ -332,7 +332,7 @@ void Runtime::ReassertNoteReplacement(GlobalNamespace::NoteController* noteContr
   }
 }
 
-void Runtime::ApplyNotePrefabFor(GlobalNamespace::NoteController* noteController) {
+void Runtime::ApplyNotePrefabFor(GlobalNamespace::NoteController* noteController, bool isFreshInit) {
   if (!IsAlive(noteController) || _currentBeatmapData == nullptr || _isResetting) return;
   auto* noteData = noteController->get_noteData();
   if (noteData == nullptr) {
@@ -363,12 +363,27 @@ void Runtime::ApplyNotePrefabFor(GlobalNamespace::NoteController* noteController
     RestoreNoteVisuals(noteController);
     return;
   }
-  auto existing = _noteReplacements.find(noteController);
-  if (existing != _noteReplacements.end() &&
-      existing->second.appliedFingerprint == ComputePrefabFingerprint(infos) &&
-      ReplacementIntact(existing->second)) {
-    ReassertNoteReplacement(noteController, existing->second);
-    return;
+  // The fingerprint-cache fast path below (added in 0.4.1 to stop notes
+  // flickering black on every refresh) is only safe when noteController is
+  // known to still represent the SAME note it did last time we saw it --
+  // i.e. called from RefreshActiveNoteVisuals for a note that's still alive
+  // and tracked. Beat Saber pools/reuses NoteController instances across the
+  // whole song, so the Init hooks (isFreshInit=true) can fire on a recycled
+  // controller that now represents a completely different note. If the new
+  // note's required prefab happens to have the same fingerprint as whatever
+  // the previous occupant had cached (common -- many maps assign one prefab
+  // to all colorNotes), trusting the cache here reasserts stale replacement
+  // state from a note that no longer exists instead of rebuilding fresh,
+  // which is what was leaving notes invisible after the pool cycled past its
+  // initial batch (i.e. "after the intro").
+  if (!isFreshInit) {
+    auto existing = _noteReplacements.find(noteController);
+    if (existing != _noteReplacements.end() &&
+        existing->second.appliedFingerprint == ComputePrefabFingerprint(infos) &&
+        ReplacementIntact(existing->second)) {
+      ReassertNoteReplacement(noteController, existing->second);
+      return;
+    }
   }
   ReplaceNoteVisuals(noteController, infos);
 }
@@ -382,7 +397,7 @@ void Runtime::RefreshActiveNoteVisuals() {
     if (IsAlive(entry.first)) active.push_back(entry.first);
   }
   for (auto* noteController : active) {
-    ApplyNotePrefabFor(noteController);
+    ApplyNotePrefabFor(noteController, /*isFreshInit=*/false);
   }
 }
 
