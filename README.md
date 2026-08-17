@@ -87,6 +87,4 @@ to point at your own repo.
   primary base of this build.
 - Braxed ([rbatteries1-design](https://github.com/rbatteries1-design)) —
   Vivify-Quest-Port, source of the merged fixes above.
-- [Lars27110](https://github.com/Lars27110) — Vivify-Quest, source of the
-  same set of fixes (near-identical codebase to Braxed's).
-- Merge, porting, and the layer/exception-safety fixes: Rayla.
+
