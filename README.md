@@ -1,4 +1,4 @@
-# Vivify Quest (Rayla's build)
+# Vivify Quest 
 
 A personal Quest port of [Vivify](https://github.com/Aeroluna/Vivify) for Beat Saber,
 built by merging three existing community ports. This is **not** an original
@@ -88,3 +88,4 @@ to point at your own repo.
 - Braxed ([rbatteries1-design](https://github.com/rbatteries1-design)) —
   Vivify-Quest-Port, source of the merged fixes above.
 
+although made by claude it is so far iv gotten the most performance from this port
