@@ -747,7 +747,7 @@ void Runtime::CacheReplacementRenderers(UnityEngine::GameObject* spawned, Visual
 
 void Runtime::InstantiateReplacementPrefab(AssignedPrefabInfo const& info,
                                            UnityEngine::Transform* parent,
-                                           VisualReplacement& replacement, int overrideLayer) {
+                                           VisualReplacement& replacement, bool inheritParentLayer) {
   if (!IsAlive(parent)) return;
   auto* prefab = GetAssetAs<UnityEngine::GameObject>(info.asset);
   if (!IsManagedAlive(prefab)) return;
@@ -757,14 +757,30 @@ void Runtime::InstantiateReplacementPrefab(AssignedPrefabInfo const& info,
   RepairGameObjectMaterials(spawned, info.asset);
   spawned->get_transform()->SetParent(parent, false);
 
-  // Ported from the rbatteries1-design/Lars27110 base: force purely-cosmetic
-  // replacement prefabs onto the "Ignore Raycast" layer instead of leaving them
-  // on whatever layer the parent/AssetBundle happened to use. Otherwise the
-  // replacement mesh sits on a layer that saber-collision and clash-detection
-  // raycasts scan, which can make arcs and saber-clash/burn-mark effects stop
-  // registering in maps that also use Vivify note replacement.
-  if (overrideLayer >= 0) {
-    SetLayerRecursively(spawned, overrideLayer);
+  // Note replacements go on the SAME layer as the note they stand in for, so
+  // they are culled and drawn by exactly the cameras that would have drawn the
+  // original.
+  //
+  // The rbatteries1-design/Lars27110 base instead forced them onto a hardcoded
+  // layer 4, described in its comment as Unity's "Ignore Raycast" layer. That
+  // description is wrong: Unity's built-in "Ignore Raycast" is layer 2, and
+  // layer 4 is "Water", which Beat Saber's gameplay cameras do not render. A
+  // replaced note was therefore moved somewhere nothing draws it while
+  // ReplaceNoteVisuals had already disabled the note's own renderers -- the
+  // note simply vanished. That is the "notes go invisible partway through a
+  // song" bug; it only starts once the map's AssignObjectPrefab has taken
+  // effect, which is why it looks like it begins mid-song.
+  //
+  // The raycast worry the old override was meant to address does not apply:
+  // raycasts hit colliders, not renderers, and CleanCustomObject above already
+  // disables every collider on the spawned prefab.
+  //
+  // Saber and debris replacements keep whatever layer the AssetBundle exported,
+  // which is what they have always done here.
+  if (inheritParentLayer) {
+    if (auto* parentObject = parent->get_gameObject().unsafePtr(); IsAlive(parentObject)) {
+      SetLayerRecursively(spawned, parentObject->get_layer());
+    }
   }
 
   auto animators = spawned->GetComponentsInChildren<UnityEngine::Animator*>(true);
@@ -862,7 +878,7 @@ void Runtime::ReplaceNoteVisuals(GlobalNamespace::NoteController* noteController
   bool const hideOriginal = ShouldHideOriginal(validInfos);
   auto originalRenderers = noteController->GetComponentsInChildren<UnityEngine::Renderer*>(true);
   for (auto* info : validInfos) {
-    InstantiateReplacementPrefab(*info, replacementParent, replacement, kVisualOnlyLayer);
+    InstantiateReplacementPrefab(*info, replacementParent, replacement, /*inheritParentLayer=*/true);
   }
   if (replacement.spawnedObjects.empty() && replacement.disabledRenderers.empty()) {
     VIVIFY_DEBUG("Vivify note replace: {} valid prefab(s) but nothing spawned/hidden", validInfos.size());

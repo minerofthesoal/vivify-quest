@@ -15,7 +15,7 @@ bool GetDisableCreateCameraDepth();
 bool GetDisableCustomNoteVisuals();
 bool GetDisableVisualsInMultiplayer();
 bool GetDisableVRCenterAdjust();
-bool GetAllowUnsafeWindowsBundleFallback();
+bool GetConvertPcBundlesOnDevice();
 void EnsureConfigDefaults();
 constexpr auto PaperLogger = Paper::ConstLoggerContext("Vivify");
 

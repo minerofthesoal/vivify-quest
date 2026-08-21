@@ -92,7 +92,8 @@ private:
   float DurationBeatsToSeconds(float durationBeats) const;
   bool IsAlive(UnityEngine::Object* object) const;
   bool IsMultiplayerModLoaded() const;
-  bool ShouldDisableVisualsForMultiplayer() const;
+  bool IsInMultiplayerGameplay();
+  bool ShouldDisableVisualsForMultiplayer();
   void UpdateSyncedObjects();
 
   void UpdatePrefabAnimationSpeed();
@@ -100,6 +101,10 @@ private:
 
   void HandleLevelSelected(SongCore::API::LevelSelect::LevelWasSelectedEventArgs const& event);
   void DownloadBundle(uint32_t checksum, std::string const& levelPath, std::function<void(bool)> callback);
+  // Kicks off an off-thread PC->Android bundle conversion for the currently
+  // selected level and re-enables the play button when it lands.
+  void ConvertPcBundleAsync(std::string const& levelPath, std::string const& sourceBundlePath);
+  void BeginBundleDownload(uint32_t checksum, std::string const& levelPath, std::string const& pcBundleFallback);
   void PreloadBundle(std::string const& bundlePath);
   void LoadMainBundle();
   void CacheBundleAssets();
@@ -251,7 +256,7 @@ private:
   void RestoreReplacementData(VisualReplacement& replacement);
   void CacheReplacementRenderers(UnityEngine::GameObject* spawned, VisualReplacement& replacement);
   void InstantiateReplacementPrefab(AssignedPrefabInfo const& info, UnityEngine::Transform* parent,
-                                    VisualReplacement& replacement, int overrideLayer = -1);
+                                    VisualReplacement& replacement, bool inheritParentLayer = false);
   UnityEngine::Color GetSaberColor(GlobalNamespace::SaberModelController* smc, GlobalNamespace::Saber* saber);
   UnityEngine::Color GetNoteColor(GlobalNamespace::NoteController* noteController);
   void ApplyColorToRenderers(std::vector<UnityEngine::Renderer*> const& renderers, UnityEngine::Color color);
@@ -359,5 +364,16 @@ private:
 
   bool _reduceDebris = false;
   bool _reduceDebrisCached = false;
+
+  bool _inMultiplayerGameplay = false;
+  bool _inMultiplayerGameplayCached = false;
+
+  // Bundle chosen for the selected level. Usually the level's own
+  // bundleAndroid2021.vivify, but it can point at a downloaded or an
+  // on-device-converted bundle that lives outside the song folder.
+  std::string _selectedBundlePath;
+  // Source path of a PC->Android bundle conversion currently running on a
+  // worker thread, so re-selecting the same level does not start a second one.
+  std::string _bundleConversionSource;
 };
 }

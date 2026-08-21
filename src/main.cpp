@@ -25,7 +25,7 @@ constexpr std::string_view kDisableCreateCameraDepthConfigKey = "disableCreateCa
 constexpr std::string_view kDisableCustomNoteVisualsConfigKey = "disableCustomNoteVisuals";
 constexpr std::string_view kDisableVisualsInMultiplayerConfigKey = "disableVisualsInMultiplayer";
 constexpr std::string_view kDisableVRCenterAdjustConfigKey = "disableVRCenterAdjust";
-constexpr std::string_view kAllowUnsafeWindowsBundleFallbackConfigKey = "allowUnsafeWindowsBundleFallback";
+constexpr std::string_view kConvertPcBundlesOnDeviceConfigKey = "convertPcBundlesOnDevice";
 bool gMultipassRenderingEnabled = true;
 bool gVivifyDebugLogging = false;
 bool gDisableBeat0FilmgrainBlit = false;
@@ -37,10 +37,13 @@ bool gDisableCustomNoteVisuals = false;
 // stay off there unless the player opts back in.
 bool gDisableVisualsInMultiplayer = true;
 bool gDisableVRCenterAdjust = false;
-// Off by default (deviates from the base's hardcoded-on behavior): loading a
-// Windows-built AssetBundle on Quest is unsupported by Unity and can crash instead
-// of just failing to load, so this stays an explicit opt-in here.
-bool gAllowUnsafeWindowsBundleFallback = false;
+// Replaces the old "allowUnsafeWindowsBundleFallback" toggle. That one handed a
+// PC-built AssetBundle straight to Unity, which simply reports no assets on
+// Android. This one instead retargets the archive to Android on device first
+// (see VivifyBundleConvert), so the geometry/prefabs in it actually load.
+// Defaults on: it only ever runs when a map has no Android bundle at all and no
+// downloadable one, i.e. when the alternative is an unplayable map.
+bool gConvertPcBundlesOnDevice = true;
 
 constexpr std::string_view kVivifyLogDir = "/sdcard/ModData/com.beatgames.beatsaber/Logs";
 constexpr std::string_view kVivifyLogPath = "/sdcard/ModData/com.beatgames.beatsaber/Logs/Vivify.log";
@@ -139,10 +142,10 @@ void RegisterModSettings() {
             container->get_transform(), u"Disable VR Center Adjust Handling", GetDisableVRCenterAdjust(),
             [](bool value) { SetBoolConfigValue(kDisableVRCenterAdjustConfigKey, value, gDisableVRCenterAdjust); });
         BSML::Lite::CreateToggle(
-            container->get_transform(), u"Allow Unsafe Windows Bundle Fallback (risky)",
-            GetAllowUnsafeWindowsBundleFallback(),
+            container->get_transform(), u"Convert PC Bundles On Device",
+            GetConvertPcBundlesOnDevice(),
             [](bool value) {
-              SetBoolConfigValue(kAllowUnsafeWindowsBundleFallbackConfigKey, value, gAllowUnsafeWindowsBundleFallback);
+              SetBoolConfigValue(kConvertPcBundlesOnDeviceConfigKey, value, gConvertPcBundlesOnDevice);
             });
       },
       "Vivify", false);
@@ -202,8 +205,8 @@ bool GetDisableVRCenterAdjust() {
   return gDisableVRCenterAdjust;
 }
 
-bool GetAllowUnsafeWindowsBundleFallback() {
-  return gAllowUnsafeWindowsBundleFallback;
+bool GetConvertPcBundlesOnDevice() {
+  return gConvertPcBundlesOnDevice;
 }
 
 void EnsureConfigDefaults() {
@@ -221,7 +224,7 @@ void EnsureConfigDefaults() {
   needsWrite |= EnsureBoolConfigValue(kDisableCustomNoteVisualsConfigKey, false, gDisableCustomNoteVisuals);
   needsWrite |= EnsureBoolConfigValue(kDisableVisualsInMultiplayerConfigKey, true, gDisableVisualsInMultiplayer);
   needsWrite |= EnsureBoolConfigValue(kDisableVRCenterAdjustConfigKey, false, gDisableVRCenterAdjust);
-  needsWrite |= EnsureBoolConfigValue(kAllowUnsafeWindowsBundleFallbackConfigKey, false, gAllowUnsafeWindowsBundleFallback);
+  needsWrite |= EnsureBoolConfigValue(kConvertPcBundlesOnDeviceConfigKey, true, gConvertPcBundlesOnDevice);
   if (needsWrite) {
     config.Write();
   }

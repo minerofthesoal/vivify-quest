@@ -18,6 +18,11 @@ CMakeUserPresets.json
 *.o
 *.obj
 
+# Converter test scratch
+tools/bundleconvert/work/
+__pycache__/
+*.pyc
+
 # OS generated files
 .DS_Store
 Thumbs.db

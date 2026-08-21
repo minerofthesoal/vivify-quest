@@ -4,6 +4,7 @@
 #include "GlobalNamespace/PlayerDataModel.hpp"
 #include "GlobalNamespace/PlayerData.hpp"
 #include "GlobalNamespace/PlayerSpecificSettings.hpp"
+#include "GlobalNamespace/MultiplayerController.hpp"
 
 namespace Vivify {
 
@@ -17,17 +18,42 @@ bool Runtime::IsAlive(UnityEngine::Object* object) const {
 }
 
 // Return true if a well-known multiplayer mod is loaded (MultiplayerCore).
-// Ported from the rbatteries1-design/Lars27110 base: Vivify's world-space
-// visuals (custom note/saber/debris prefabs) aren't validated for multiplayer
-// lobbies, so this lets them be disabled there via the settings toggle.
+// Kept only for diagnostics -- see IsInMultiplayerGameplay() for why this must
+// NOT be used to decide whether to draw Vivify's visuals.
 bool Runtime::IsMultiplayerModLoaded() const {
   CModInfo info{"MultiplayerCore", nullptr, 0};
   auto res = modloader_get_mod(&info, MatchType_IdOnly);
   return res.handle != nullptr;
 }
 
-bool Runtime::ShouldDisableVisualsForMultiplayer() const {
-  return GetDisableVisualsInMultiplayer() && IsMultiplayerModLoaded();
+// True only while an actual multiplayer game is running.
+//
+// The rbatteries1-design/Lars27110 base gated the "Disable Vivify Visuals In
+// Multiplayer" setting on IsMultiplayerModLoaded(), i.e. on whether the
+// MultiplayerCore *mod is installed*, not on whether the player is actually in
+// a multiplayer lobby. Since that setting defaults to on and MultiplayerCore is
+// installed on most Quest setups, the old check disabled custom sabers (and
+// custom debris) in solo play for basically everyone -- notes still worked,
+// because ReplaceNoteVisuals never consulted this. That's the "custom sabers
+// don't work" bug.
+//
+// MultiplayerController only exists in the multiplayer gameplay scene, in both
+// vanilla and MultiplayerCore-modded lobbies, so its presence is the actual
+// signal. The lookup is cached for the lifetime of a beatmap (ResetRuntime
+// clears it) so this stays off the per-note/per-frame path.
+bool Runtime::IsInMultiplayerGameplay() {
+  if (!_inMultiplayerGameplayCached) {
+    _inMultiplayerGameplayCached = true;
+    auto* controller = UnityEngine::Object::FindObjectOfType<GlobalNamespace::MultiplayerController*>();
+    _inMultiplayerGameplay = IsManagedAlive(controller);
+    VIVIFY_DEBUG("Vivify multiplayer check: inMultiplayerGameplay={} multiplayerModLoaded={}",
+                 BoolText(_inMultiplayerGameplay), BoolText(IsMultiplayerModLoaded()));
+  }
+  return _inMultiplayerGameplay;
+}
+
+bool Runtime::ShouldDisableVisualsForMultiplayer() {
+  return GetDisableVisualsInMultiplayer() && IsInMultiplayerGameplay();
 }
 
 void Runtime::LateLoad() {
@@ -471,6 +497,8 @@ void Runtime::ResetRuntime() {
   _pauseMenuActive = false;
   _reduceDebrisCached = false;
   _reduceDebris = false;
+  _inMultiplayerGameplayCached = false;
+  _inMultiplayerGameplay = false;
   _isResetting = false;
 }
 
