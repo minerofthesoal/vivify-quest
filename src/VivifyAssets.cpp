@@ -89,15 +89,30 @@ std::string ConvertedBundleCacheDir() {
   return "/sdcard/ModData/com.beatgames.beatsaber/Mods/Vivify/ConvertedBundles";
 }
 
-// Cache key for a converted bundle: derived from the source path plus its size
-// and mtime, so editing or replacing the source bundle invalidates the cache
-// without needing to hash hundreds of megabytes.
+// Cache key for a converted bundle.
+//
+// Deliberately built from the song folder name, the bundle file name, and the
+// bundle's size and mtime -- NOT from its absolute path. The bulk pass walks
+// SongCore's level roots while level selection uses
+// CustomBeatmapLevel::customLevelPath, and on Android the same directory is
+// reachable as /sdcard/..., /storage/emulated/0/... and
+// /storage/self/primary/... . Keying on the absolute path meant those two
+// routes could hash the same file differently, so a bundle converted by the
+// bulk pass was not found again at level selection and the map stayed
+// unplayable as though nothing had been converted.
+//
+// Size and mtime still invalidate the entry when the source bundle changes,
+// without having to hash hundreds of megabytes.
 std::string ConvertedBundlePath(std::string const& sourceBundlePath) {
+  std::filesystem::path const source(sourceBundlePath);
+  std::string const fileName = source.filename().string();
+  std::string const folderName = source.parent_path().filename().string();
+
   std::error_code ec;
-  uint64_t size = std::filesystem::file_size(sourceBundlePath, ec);
+  uint64_t size = std::filesystem::file_size(source, ec);
   if (ec) size = 0;
   ec.clear();
-  auto const writeTime = std::filesystem::last_write_time(sourceBundlePath, ec);
+  auto const writeTime = std::filesystem::last_write_time(source, ec);
   uint64_t stamp = 0;
   if (!ec) stamp = static_cast<uint64_t>(writeTime.time_since_epoch().count());
 
@@ -108,13 +123,27 @@ std::string ConvertedBundlePath(std::string const& sourceBundlePath) {
       hash *= 1099511628211ull;
     }
   };
-  mix(sourceBundlePath);
+  mix(folderName);
+  mix("\x1f");
+  mix(fileName);
+  mix("\x1f");
   mix(std::to_string(size));
+  mix("\x1f");
   mix(std::to_string(stamp));
 
-  char name[32];
-  std::snprintf(name, sizeof(name), "%016llx.vivify", static_cast<unsigned long long>(hash));
-  return JoinPath(ConvertedBundleCacheDir(), name);
+  // Keep a readable prefix so the cache directory can be eyeballed against the
+  // song list when something looks wrong.
+  std::string prefix;
+  for (char c : folderName) {
+    if (prefix.size() >= 48) break;
+    bool const safe = (c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+                      c == '-' || c == '_';
+    prefix.push_back(safe ? c : '_');
+  }
+
+  char suffix[32];
+  std::snprintf(suffix, sizeof(suffix), "_%016llx.vivify", static_cast<unsigned long long>(hash));
+  return JoinPath(ConvertedBundleCacheDir(), prefix + suffix);
 }
 
 uint32_t ReadAndroidChecksumFromInfoDat(std::string const& levelPath) {
@@ -902,6 +931,7 @@ void StartBulkPcBundleConversion(std::function<void(BulkConversionProgress const
         std::string const dest = ConvertedBundlePath(source);
         if (std::filesystem::exists(dest)) {
           progress.alreadyDone++;
+          PaperLogger.info("Vivify bulk convert: '{}' already cached at '{}'", source, dest);
           continue;
         }
 

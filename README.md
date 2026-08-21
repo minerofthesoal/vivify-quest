@@ -123,7 +123,15 @@ and repacks it uncompressed. Unity then accepts and enumerates the bundle.
   while it works.
 - Output is cached under
   `/sdcard/ModData/com.beatgames.beatsaber/Mods/Vivify/ConvertedBundles/`,
-  keyed by the source path, size and mtime, so each bundle is converted once.
+  keyed by the song folder name, bundle file name, size and mtime — pointedly
+  *not* by absolute path. The bulk pass walks SongCore's level roots while
+  level selection uses `customLevelPath`, and on Android the same directory is
+  reachable as `/sdcard/…`, `/storage/emulated/0/…` and
+  `/storage/self/primary/…`; keying on the path let those two routes hash the
+  same file differently, so a bulk-converted bundle was not found again at
+  level selection and the map stayed unplayable as if nothing had converted.
+  Cached files are named after the song folder so the directory can be
+  eyeballed against the song list.
   Song folders are never modified. Writes go to a `.part` file and are renamed
   into place, so an interrupted conversion can't leave a truncated file that a
   later run mistakes for a finished one.
@@ -139,6 +147,10 @@ and repacks it uncompressed. Unity then accepts and enumerates the bundle.
   not promise a callback on every failure mode, so a request that never
   resolved previously left the play button disabled for the rest of the
   session.
+- Vivify logs which mods are blocking the play button whenever that changes.
+  SongCore aggregates the decision across every installed mod, so a map held
+  by an unrelated requirement looks identical to one Vivify is holding; the
+  log now names the mod and its reason.
 - Every path that leaves the play button disabled now names its own reason
   ("Convert failed: unsupported bundle compression", "Asset download timed
   out", "PC bundle found; enable Convert PC Bundles On Device in settings",
