@@ -1,6 +1,7 @@
 #include "VivifyRuntimeInternal.hpp"
 #include "VivifyComponents.hpp"
 #include "VivifyBundleConvert.hpp"
+#include <atomic>
 #include <cstdio>
 #include <cstring>
 #include <thread>
@@ -24,6 +25,61 @@ std::string ResolveBundlePath(std::string const& levelPath) {
     }
   }
   return {};
+}
+
+// Finds a PC-built Vivify AssetBundle in a song folder, by content.
+//
+// Bundle file names are not standardised. This port's own download path writes
+// "bundleAndroid2021.vivify", but a map authored for PC ships whatever Vivify's
+// Unity exporter produced -- commonly "bundleWindows2019" or
+// "bundleWindows2021" with NO extension at all. The previous ".vivify"-only
+// scan therefore found nothing on exactly the maps the conversion path exists
+// to rescue: they were reported as "does not support your game version", the
+// play button stayed disabled, and no bundle was ever offered for conversion.
+//
+// Every candidate is checked for the UnityFS signature instead, so the name
+// does not matter. Names are used only to rank equally-valid candidates: a
+// "windows" name wins over a generic "bundle" name, which wins over anything
+// else that happens to be a Unity archive.
+std::string ResolvePcBundlePath(std::string const& levelPath) {
+  std::error_code ec;
+  std::string best;
+  int bestScore = -1;
+  for (auto const& entry : std::filesystem::directory_iterator(levelPath, ec)) {
+    if (ec) break;
+    if (!entry.is_regular_file(ec) || ec) {
+      ec.clear();
+      continue;
+    }
+    auto const& path = entry.path();
+    std::string lower = path.filename().string();
+    std::transform(lower.begin(), lower.end(), lower.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+
+    // Skip the file types a song folder is otherwise made of, then content-check
+    // whatever is left. Being permissive here is the point: over-restrictive
+    // name matching is what hid these bundles in the first place.
+    static constexpr std::string_view kNonBundleExtensions[] = {
+        ".dat", ".json", ".ogg", ".egg", ".wav", ".mp3", ".jpg", ".jpeg", ".png", ".bmp", ".txt", ".md",
+    };
+    std::string const extension = path.extension().string();
+    std::string lowerExtension = extension;
+    std::transform(lowerExtension.begin(), lowerExtension.end(), lowerExtension.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    if (std::find(std::begin(kNonBundleExtensions), std::end(kNonBundleExtensions), lowerExtension) !=
+        std::end(kNonBundleExtensions)) {
+      continue;
+    }
+
+    int score = 1;
+    if (lower.find("windows") != std::string::npos) score = 3;
+    else if (lower.find("bundle") != std::string::npos || path.extension() == ".vivify") score = 2;
+    if (score <= bestScore) continue;
+    if (!BundleConvert::IsUnityBundleFile(path.string())) continue;
+    best = path.string();
+    bestScore = score;
+  }
+  return best;
 }
 
 // Where on-device-converted bundles are cached. Kept out of the song folder so
@@ -200,7 +256,6 @@ void Runtime::HandleLevelSelected(SongCore::API::LevelSelect::LevelWasSelectedEv
   MetaCore::Game::SetScoreSubmission("Vivify", false);
 
   std::string const androidBundlePath = JoinPath(_selectedLevelPath, std::string(kBundleFile));
-  std::string bundlePath = ResolveBundlePath(_selectedLevelPath);
 
   if (std::filesystem::exists(androidBundlePath)) {
     if (GetVivifyDebugLogging()) {
@@ -216,7 +271,7 @@ void Runtime::HandleLevelSelected(SongCore::API::LevelSelect::LevelWasSelectedEv
   // there; remember it as the conversion source, but prefer downloading the
   // real Android build first -- a proper Android bundle keeps its shaders and
   // textures, a converted one does not.
-  std::string const pcBundleFallback = bundlePath;
+  std::string const pcBundleFallback = ResolvePcBundlePath(_selectedLevelPath);
   uint32_t const androidChecksum = ReadAndroidChecksumFromInfoDat(_selectedLevelPath);
   if (GetVivifyDebugLogging()) {
     PaperLogger.info("Vivify bundle selection: no Android bundle in '{}' android2021={} pcBundle='{}'",
@@ -708,6 +763,121 @@ void Runtime::RepairLoadedMaterialShaders() {
       RepairGameObjectMaterials(gameObject, path);
     }
   }
+}
+
+
+// ---------------------------------------------------------------------------
+// Bulk conversion
+//
+// A map that ships only a PC bundle has its play button disabled, so there is
+// no way to reach it through normal level selection -- which also means no way
+// to trigger a per-level conversion. This pass walks every installed custom
+// level directly and converts anything convertible, so those maps become
+// playable without having to be playable first.
+// ---------------------------------------------------------------------------
+
+namespace {
+std::atomic<bool> gBulkConversionRunning{false};
+
+std::vector<std::filesystem::path> CollectCustomLevelDirectories() {
+  std::vector<std::filesystem::path> roots;
+  for (auto const& root : SongCore::API::Loading::GetRootCustomLevelPaths()) roots.push_back(root);
+  for (auto const& root : SongCore::API::Loading::GetRootCustomWIPLevelPaths()) roots.push_back(root);
+
+  std::vector<std::filesystem::path> levels;
+  std::error_code ec;
+  for (auto const& root : roots) {
+    if (!std::filesystem::is_directory(root, ec) || ec) {
+      ec.clear();
+      continue;
+    }
+    for (auto const& entry : std::filesystem::directory_iterator(root, ec)) {
+      if (ec) break;
+      if (entry.is_directory(ec) && !ec) levels.push_back(entry.path());
+      ec.clear();
+    }
+    ec.clear();
+  }
+  return levels;
+}
+}
+
+bool IsBulkPcBundleConversionRunning() {
+  return gBulkConversionRunning.load();
+}
+
+void StartBulkPcBundleConversion(std::function<void(BulkConversionProgress const&)> onProgress) {
+  bool expected = false;
+  if (!gBulkConversionRunning.compare_exchange_strong(expected, true)) {
+    return;
+  }
+
+  // SongCore's level roots are enumerated here, on the caller's (main) thread,
+  // rather than inside the worker: a song refresh can rewrite them, and the
+  // worker only needs the snapshot.
+  auto levels = CollectCustomLevelDirectories();
+
+  std::thread([onProgress = std::move(onProgress), levels = std::move(levels)]() {
+    auto report = [&onProgress](BulkConversionProgress progress) {
+      if (!onProgress) return;
+      BSML::MainThreadScheduler::Schedule([onProgress, progress]() { onProgress(progress); });
+    };
+
+    BulkConversionProgress progress;
+    try {
+      progress.levelsTotal = static_cast<int>(levels.size());
+      progress.status = "Scanning " + std::to_string(progress.levelsTotal) + " level(s)...";
+      report(progress);
+
+      for (auto const& level : levels) {
+        progress.levelsScanned++;
+        std::string const levelPath = level.string();
+
+        // Maps that already have an Android bundle need nothing.
+        if (std::filesystem::exists(JoinPath(levelPath, std::string(kBundleFile)))) continue;
+
+        std::string const source = ResolvePcBundlePath(levelPath);
+        if (source.empty()) continue;
+
+        std::string const dest = ConvertedBundlePath(source);
+        if (std::filesystem::exists(dest)) {
+          progress.alreadyDone++;
+          continue;
+        }
+
+        progress.status = level.filename().string();
+        report(progress);
+
+        auto const result = BundleConvert::ConvertToAndroid(source, dest);
+        if (result.ok()) {
+          progress.converted++;
+          PaperLogger.info("Vivify bulk convert: '{}' -> '{}' ({})", source, dest, result.message);
+        } else if (result.status == BundleConvert::Status::AlreadyAndroid) {
+          progress.alreadyDone++;
+        } else {
+          progress.failed++;
+          PaperLogger.warn("Vivify bulk convert failed for '{}' ({}): {}", source,
+                           std::string(BundleConvert::StatusText(result.status)), result.message);
+        }
+        report(progress);
+      }
+
+      progress.status = "Converted " + std::to_string(progress.converted) + ", already done " +
+                        std::to_string(progress.alreadyDone) + ", failed " + std::to_string(progress.failed);
+      PaperLogger.info("Vivify bulk convert finished: scanned={} converted={} alreadyDone={} failed={}",
+                       progress.levelsScanned, progress.converted, progress.alreadyDone, progress.failed);
+    } catch (std::exception const& ex) {
+      progress.status = std::string("Conversion pass failed: ") + ex.what();
+      PaperLogger.error("Vivify bulk convert threw: {}", ex.what());
+    } catch (...) {
+      progress.status = "Conversion pass failed";
+      PaperLogger.error("Vivify bulk convert threw a non-std exception");
+    }
+
+    progress.finished = true;
+    report(progress);
+    gBulkConversionRunning.store(false);
+  }).detach();
 }
 
 }

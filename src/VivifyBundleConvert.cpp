@@ -1016,6 +1016,16 @@ std::string BuildTargetName(int32_t target) {
   }
 }
 
+bool IsUnityBundleFile(std::string const& path) {
+  std::error_code ec;
+  if (!std::filesystem::is_regular_file(path, ec) || ec) return false;
+  std::ifstream in(path, std::ios::binary);
+  if (!in.is_open()) return false;
+  char signature[8] = {};
+  if (!in.read(signature, sizeof(signature))) return false;
+  return std::memcmp(signature, "UnityFS\0", sizeof(signature)) == 0;
+}
+
 Result ConvertToAndroid(std::string const& sourcePath, std::string const& destPath) {
   Result result;
   ArchiveHeader header;

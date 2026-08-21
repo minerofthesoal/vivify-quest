@@ -80,6 +80,14 @@ struct Result {
 // Status::AlreadyAndroid and writes nothing.
 Result ConvertToAndroid(std::string const& sourcePath, std::string const& destPath);
 
+// True if the file at path begins with the UnityFS archive signature.
+//
+// Reads 8 bytes; it does not validate the rest of the archive. Vivify maps do
+// not agree on a file name for their bundles -- PC maps commonly ship
+// "bundleWindows2019"/"bundleWindows2021" with no extension at all -- so
+// content is the only dependable way to find one in a song folder.
+bool IsUnityBundleFile(std::string const& path);
+
 std::string_view StatusText(Status status);
 std::string BuildTargetName(int32_t target);
 

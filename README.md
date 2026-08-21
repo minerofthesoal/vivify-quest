@@ -85,13 +85,31 @@ Each command buffer now ends with `SetRenderTarget(CameraTarget)`, whose
 single-identifier overload re-binds the target as both colour *and* depth with
 `LoadAction.Load`, so the camera's depth contents survive.
 
-### PC ("Windows") bundles loading with no assets — and the on-device converter
+### PC ("Windows") bundle maps being unplayable, and the on-device converter
 
-The old "Allow Unsafe Windows Bundle Fallback" toggle handed a PC-built
-AssetBundle straight to `AssetBundle.LoadFromFile`. Unity does not reject that
-outright on Android: it hands back a bundle object whose `GetAllAssetNames()`
-is empty. That is exactly the reported "the experimental Windows bundle doesn't
-have any assets" behaviour — the fallback could never have worked.
+Two separate defects stacked here.
+
+**The bundle was never found.** Bundle discovery only ever matched files with a
+`.vivify` extension. That is what this port's *own* download path writes
+(`bundleAndroid2021.vivify`), but a map authored for PC ships whatever Vivify's
+Unity exporter produced — commonly `bundleWindows2019` or `bundleWindows2021`
+with **no extension at all**. So on exactly the maps a conversion path exists to
+rescue, no bundle was detected: the map reported "This map does not support your
+game version", the play button stayed disabled, and there was nothing to offer
+for conversion. The old fallback's own `IsWindowsBundlePath` check looked for
+"bundlewindows" in a path that could only ever end in `.vivify` — it could never
+have fired.
+
+Discovery is now by **content**: any file in the song folder is accepted if it
+starts with the `UnityFS` signature, whatever it is called. Names are used only
+to rank candidates. As a side effect, maps shipping an *Android* bundle without
+the `.vivify` extension now load too.
+
+**The fallback could not have worked anyway.** The old "Allow Unsafe Windows
+Bundle Fallback" toggle handed the PC bundle straight to
+`AssetBundle.LoadFromFile`. Unity does not reject that outright on Android: it
+hands back a bundle object whose `GetAllAssetNames()` is empty — exactly the
+reported "the experimental Windows bundle doesn't have any assets" behaviour.
 
 That toggle is replaced by **Convert PC Bundles On Device** (on by default).
 `src/VivifyBundleConvert.cpp` unpacks the UnityFS archive, rewrites the
@@ -113,6 +131,14 @@ and repacks it uncompressed. Unity then accepts and enumerates the bundle.
   real Android build by its `android2021` checksum → convert a PC bundle. A
   downloaded Android build is always preferred, and a failed download now falls
   back to conversion instead of just giving up.
+
+**Convert All PC Bundles Now.** Per-level conversion runs on level *selection*,
+not on play, so it does not need a playable map — but it does need you to be
+able to reach the level. The Vivify settings menu therefore also has a **Convert
+All PC Bundles Now** button that walks every installed custom level (including
+WIP levels), converts everything convertible in one background pass, and reports
+progress under the button. Nothing needs to be selected or playable for it to
+run, and already-converted maps are skipped.
 
 **What conversion can and cannot rescue.** Meshes, prefabs, GameObject
 hierarchies, animations, animator controllers, audio, text assets and material
