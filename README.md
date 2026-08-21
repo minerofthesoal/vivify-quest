@@ -85,13 +85,31 @@ Each command buffer now ends with `SetRenderTarget(CameraTarget)`, whose
 single-identifier overload re-binds the target as both colour *and* depth with
 `LoadAction.Load`, so the camera's depth contents survive.
 
-### PC ("Windows") bundles loading with no assets — and the on-device converter
+### PC ("Windows") bundle maps being unplayable, and the on-device converter
 
-The old "Allow Unsafe Windows Bundle Fallback" toggle handed a PC-built
-AssetBundle straight to `AssetBundle.LoadFromFile`. Unity does not reject that
-outright on Android: it hands back a bundle object whose `GetAllAssetNames()`
-is empty. That is exactly the reported "the experimental Windows bundle doesn't
-have any assets" behaviour — the fallback could never have worked.
+Two separate defects stacked here.
+
+**The bundle was never found.** Bundle discovery only ever matched files with a
+`.vivify` extension. That is what this port's *own* download path writes
+(`bundleAndroid2021.vivify`), but a map authored for PC ships whatever Vivify's
+Unity exporter produced — commonly `bundleWindows2019` or `bundleWindows2021`
+with **no extension at all**. So on exactly the maps a conversion path exists to
+rescue, no bundle was detected: the map reported "This map does not support your
+game version", the play button stayed disabled, and there was nothing to offer
+for conversion. The old fallback's own `IsWindowsBundlePath` check looked for
+"bundlewindows" in a path that could only ever end in `.vivify` — it could never
+have fired.
+
+Discovery is now by **content**: any file in the song folder is accepted if it
+starts with the `UnityFS` signature, whatever it is called. Names are used only
+to rank candidates. As a side effect, maps shipping an *Android* bundle without
+the `.vivify` extension now load too.
+
+**The fallback could not have worked anyway.** The old "Allow Unsafe Windows
+Bundle Fallback" toggle handed the PC bundle straight to
+`AssetBundle.LoadFromFile`. Unity does not reject that outright on Android: it
+hands back a bundle object whose `GetAllAssetNames()` is empty — exactly the
+reported "the experimental Windows bundle doesn't have any assets" behaviour.
 
 That toggle is replaced by **Convert PC Bundles On Device** (on by default).
 `src/VivifyBundleConvert.cpp` unpacks the UnityFS archive, rewrites the
@@ -105,14 +123,47 @@ and repacks it uncompressed. Unity then accepts and enumerates the bundle.
   while it works.
 - Output is cached under
   `/sdcard/ModData/com.beatgames.beatsaber/Mods/Vivify/ConvertedBundles/`,
-  keyed by the source path, size and mtime, so each bundle is converted once.
+  keyed by the song folder name, bundle file name, size and mtime — pointedly
+  *not* by absolute path. The bulk pass walks SongCore's level roots while
+  level selection uses `customLevelPath`, and on Android the same directory is
+  reachable as `/sdcard/…`, `/storage/emulated/0/…` and
+  `/storage/self/primary/…`; keying on the path let those two routes hash the
+  same file differently, so a bulk-converted bundle was not found again at
+  level selection and the map stayed unplayable as if nothing had converted.
+  Cached files are named after the song folder so the directory can be
+  eyeballed against the song list.
   Song folders are never modified. Writes go to a `.part` file and are renamed
   into place, so an interrupted conversion can't leave a truncated file that a
   later run mistakes for a finished one.
-- Bundle resolution order is now: the map's own Android bundle → download the
-  real Android build by its `android2021` checksum → convert a PC bundle. A
-  downloaded Android build is always preferred, and a failed download now falls
-  back to conversion instead of just giving up.
+- Bundle resolution order is: the map's own Android bundle → a bundle already
+  converted on this device → download the real Android build by its
+  `android2021` checksum → convert the PC bundle. An already-converted bundle
+  deliberately outranks the download: a map that ships a PC bundle usually has
+  no Android build in the repo to fetch (that is *why* it only ships a PC
+  bundle), so checking the network first meant a converted map could sit on
+  "Downloading assets..." with a perfectly good converted bundle unused in the
+  cache.
+- Downloads now time out after 45s and fall back to conversion. WebUtils does
+  not promise a callback on every failure mode, so a request that never
+  resolved previously left the play button disabled for the rest of the
+  session.
+- Vivify logs which mods are blocking the play button whenever that changes.
+  SongCore aggregates the decision across every installed mod, so a map held
+  by an unrelated requirement looks identical to one Vivify is holding; the
+  log now names the mod and its reason.
+- Every path that leaves the play button disabled now names its own reason
+  ("Convert failed: unsupported bundle compression", "Asset download timed
+  out", "PC bundle found; enable Convert PC Bundles On Device in settings",
+  …), and level selection always logs one line to `Vivify.log` recording the
+  Android bundle, PC bundle, checksum, cache path and decision taken.
+
+**Convert All PC Bundles Now.** Per-level conversion runs on level *selection*,
+not on play, so it does not need a playable map — but it does need you to be
+able to reach the level. The Vivify settings menu therefore also has a **Convert
+All PC Bundles Now** button that walks every installed custom level (including
+WIP levels), converts everything convertible in one background pass, and reports
+progress under the button. Nothing needs to be selected or playable for it to
+run, and already-converted maps are skipped.
 
 **What conversion can and cannot rescue.** Meshes, prefabs, GameObject
 hierarchies, animations, animator controllers, audio, text assets and material

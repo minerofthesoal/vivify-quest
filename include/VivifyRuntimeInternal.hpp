@@ -105,6 +105,10 @@ private:
   // selected level and re-enables the play button when it lands.
   void ConvertPcBundleAsync(std::string const& levelPath, std::string const& sourceBundlePath);
   void BeginBundleDownload(uint32_t checksum, std::string const& levelPath, std::string const& pcBundleFallback);
+  // Abandons any in-flight asset download so its callback becomes a no-op.
+  void CancelPendingDownload();
+  // Gives up on a download that never called back and falls back to conversion.
+  void CheckDownloadTimeout();
   void PreloadBundle(std::string const& bundlePath);
   void LoadMainBundle();
   void CacheBundleAssets();
@@ -375,5 +379,12 @@ private:
   // Source path of a PC->Android bundle conversion currently running on a
   // worker thread, so re-selecting the same level does not start a second one.
   std::string _bundleConversionSource;
+
+  // In-flight asset download. WebUtils does not guarantee a callback on every
+  // failure mode, so the play button is not left waiting on one forever.
+  int _downloadGeneration = 0;
+  float _downloadDeadline = -1.0f;
+  std::string _pendingDownloadLevelPath;
+  std::string _pendingDownloadPcFallback;
 };
 }

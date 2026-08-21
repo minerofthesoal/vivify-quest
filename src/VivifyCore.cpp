@@ -67,6 +67,27 @@ void Runtime::LateLoad() {
   SongCore::API::LevelSelect::GetLevelWasSelectedEvent() += [](SongCore::API::LevelSelect::LevelWasSelectedEventArgs const& event) {
     Runtime::Instance().HandleLevelSelected(event);
   };
+
+  // A greyed-out play button says nothing about which mod greyed it out, and
+  // SongCore aggregates the decision across every installed mod -- so a map
+  // blocked by an unrelated requirement looks exactly like one Vivify blocked.
+  // Log the full picture whenever it changes; this is usually the fastest way
+  // to tell "Vivify has not loaded assets yet" apart from "some other mod is
+  // holding this level".
+  SongCore::API::PlayButton::GetPlayButtonDisablingModsChangedEvent() +=
+      [](std::span<SongCore::API::PlayButton::PlayButtonDisablingModInfo const> disablingMods) {
+        if (disablingMods.empty()) {
+          PaperLogger.info("Vivify: play button is enabled (no mod is blocking it)");
+          return;
+        }
+        std::string blockers;
+        for (auto const& info : disablingMods) {
+          if (!blockers.empty()) blockers += ", ";
+          blockers += info.modID;
+          if (!info.reason.empty()) blockers += " (\"" + info.reason + "\")";
+        }
+        PaperLogger.info("Vivify: play button blocked by {}", blockers);
+      };
 }
 
 void Runtime::EnsureBehaviour() {
@@ -91,6 +112,8 @@ void Runtime::OnCustomEventStatic(GlobalNamespace::BeatmapCallbacksController* c
 void Runtime::Update() {
 
   try {
+    // Runs in the menu too, so a stalled download is not left pending.
+    CheckDownloadTimeout();
     UpdateSyncedObjects();
     if (_audioTimeSyncController != nullptr && !UnityEngine::Object::op_Implicit_bool(_audioTimeSyncController)) {
       ResetRuntime();

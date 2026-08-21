@@ -1,5 +1,6 @@
 #include "main.hpp"
 #include "VivifyRuntime.hpp"
+#include <string>
 #include <string_view>
 #include <fstream>
 #include <mutex>
@@ -7,8 +8,12 @@
 #include "HMUI/ViewController.hpp"
 #include "UnityEngine/GameObject.hpp"
 #include "UnityEngine/Transform.hpp"
+#include "bsml/shared/BSML-Lite/Creation/Buttons.hpp"
 #include "bsml/shared/BSML-Lite/Creation/Layout.hpp"
 #include "bsml/shared/BSML-Lite/Creation/Settings.hpp"
+#include "bsml/shared/BSML-Lite/Creation/Text.hpp"
+#include "beatsaber-hook/shared/utils/typedefs-wrappers.hpp"
+#include "HMUI/CurvedTextMeshPro.hpp"
 #include "bsml/shared/BSML/Settings/BSMLSettings.hpp"
 #include "custom-types/shared/register.hpp"
 #include "scotland2/shared/modloader.h"
@@ -114,6 +119,18 @@ void SetBoolConfigValue(std::string_view key, bool enabled, bool& value) {
   config.Write();
 }
 
+// Label under the bulk-convert button. The settings view controller is
+// destroyed and rebuilt as the player navigates and conversion progress
+// arrives asynchronously, so SafePtrUnity is used for its destroyed-object
+// aware liveness check -- a plain SafePtr is not even permitted for Unity
+// types.
+SafePtrUnity<HMUI::CurvedTextMeshPro> gConvertStatusText;
+
+void SetConvertStatusText(std::string const& text) {
+  if (!gConvertStatusText) return;
+  gConvertStatusText->set_text(StringW(text));
+}
+
 void RegisterModSettings() {
   BSML::BSMLSettings::get_instance()->TryAddSettingsMenu(
       [](HMUI::ViewController* viewController, bool firstActivation, bool, bool) {
@@ -146,6 +163,27 @@ void RegisterModSettings() {
             GetConvertPcBundlesOnDevice(),
             [](bool value) {
               SetBoolConfigValue(kConvertPcBundlesOnDeviceConfigKey, value, gConvertPcBundlesOnDevice);
+            });
+
+        // A map whose only asset bundle is a PC build has its play button
+        // disabled, so it can never be selected into -- which also means the
+        // per-level conversion that runs on level select can never fire for it.
+        // This button converts every installed map in one pass instead, so
+        // those levels become playable without having to be playable first.
+        gConvertStatusText = BSML::Lite::CreateText(container->get_transform(), u"Idle");
+        if (Vivify::IsBulkPcBundleConversionRunning()) SetConvertStatusText("Converting...");
+        BSML::Lite::CreateUIButton(
+            container->get_transform(), u"Convert All PC Bundles Now", []() {
+              if (Vivify::IsBulkPcBundleConversionRunning()) return;
+              SetConvertStatusText("Scanning...");
+              Vivify::StartBulkPcBundleConversion([](Vivify::BulkConversionProgress const& progress) {
+                if (progress.finished) {
+                  SetConvertStatusText(progress.status);
+                  return;
+                }
+                SetConvertStatusText(std::to_string(progress.levelsScanned) + "/" +
+                                     std::to_string(progress.levelsTotal) + "  " + progress.status);
+              });
             });
       },
       "Vivify", false);
