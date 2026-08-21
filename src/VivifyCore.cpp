@@ -91,6 +91,8 @@ void Runtime::OnCustomEventStatic(GlobalNamespace::BeatmapCallbacksController* c
 void Runtime::Update() {
 
   try {
+    // Runs in the menu too, so a stalled download is not left pending.
+    CheckDownloadTimeout();
     UpdateSyncedObjects();
     if (_audioTimeSyncController != nullptr && !UnityEngine::Object::op_Implicit_bool(_audioTimeSyncController)) {
       ResetRuntime();

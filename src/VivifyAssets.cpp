@@ -232,6 +232,7 @@ void Runtime::HandleLevelSelected(SongCore::API::LevelSelect::LevelWasSelectedEv
   _selectedLevelPath.clear();
   _selectedBundlePath.clear();
   _selectedMapHasVivifyRequirement = false;
+  CancelPendingDownload();
   if (!event.isCustom || event.customBeatmapLevel == nullptr) {
     SongCore::API::PlayButton::EnablePlayButton("Vivify");
     return;
@@ -267,16 +268,36 @@ void Runtime::HandleLevelSelected(SongCore::API::LevelSelect::LevelWasSelectedEv
     return;
   }
 
-  // No Android bundle in the song folder. A PC-built one may still be sitting
-  // there; remember it as the conversion source, but prefer downloading the
-  // real Android build first -- a proper Android bundle keeps its shaders and
-  // textures, a converted one does not.
+  // No Android bundle in the song folder. Work out what else is available
+  // before deciding, and log the whole picture unconditionally -- when a map
+  // will not start, this one line says exactly which branch was taken and why.
   std::string const pcBundleFallback = ResolvePcBundlePath(_selectedLevelPath);
   uint32_t const androidChecksum = ReadAndroidChecksumFromInfoDat(_selectedLevelPath);
-  if (GetVivifyDebugLogging()) {
-    PaperLogger.info("Vivify bundle selection: no Android bundle in '{}' android2021={} pcBundle='{}'",
-                     _selectedLevelPath, androidChecksum,
-                     pcBundleFallback.empty() ? std::string("<none>") : pcBundleFallback);
+  std::string const cachedConversion =
+      pcBundleFallback.empty() ? std::string() : ConvertedBundlePath(pcBundleFallback);
+  bool const haveCachedConversion = !cachedConversion.empty() && std::filesystem::exists(cachedConversion);
+
+  PaperLogger.info(
+      "Vivify bundle selection: level='{}' androidBundle=no android2021={} pcBundle='{}' convertedCache='{}' cached={}",
+      _selectedLevelPath, androidChecksum,
+      pcBundleFallback.empty() ? std::string("<none>") : pcBundleFallback,
+      cachedConversion.empty() ? std::string("<none>") : cachedConversion,
+      BoolText(haveCachedConversion));
+
+  // An already-converted bundle is on disk and ready, so use it now instead of
+  // going to the network.
+  //
+  // Checking the download first was wrong: a map that ships a PC bundle
+  // usually has no Android build in the bundle repo to download -- that is why
+  // it only ships a PC bundle -- so the request fails, or worse hangs, and the
+  // play button sits on "Downloading assets..." while a perfectly good
+  // converted bundle is sitting in the cache unused. That is what made
+  // already-converted levels stay unplayable.
+  if (haveCachedConversion) {
+    _selectedBundlePath = cachedConversion;
+    SongCore::API::PlayButton::EnablePlayButton("Vivify");
+    PreloadBundle(cachedConversion);
+    return;
   }
 
   if (androidChecksum != 0) {
@@ -287,13 +308,51 @@ void Runtime::HandleLevelSelected(SongCore::API::LevelSelect::LevelWasSelectedEv
     ConvertPcBundleAsync(_selectedLevelPath, pcBundleFallback);
     return;
   }
-  SongCore::API::PlayButton::DisablePlayButton("Vivify", "This map does not support your game version.");
+  PaperLogger.warn("Vivify: '{}' has no Android bundle, no PC bundle to convert, and no android2021 checksum",
+                   _selectedLevelPath);
+  SongCore::API::PlayButton::DisablePlayButton("Vivify", "No Vivify assets found for this map.");
+}
+
+void Runtime::CancelPendingDownload() {
+  _downloadGeneration++;
+  _downloadDeadline = -1.0f;
+  _pendingDownloadLevelPath.clear();
+  _pendingDownloadPcFallback.clear();
+}
+
+// WebUtils does not promise a callback on every failure mode (a dropped
+// connection or a stalled request can simply never resolve), and a level whose
+// play button is waiting on one would stay unplayable for the rest of the
+// session. Time it out and take the conversion path instead.
+void Runtime::CheckDownloadTimeout() {
+  if (_downloadDeadline < 0.0f) return;
+  if (UnityEngine::Time::get_realtimeSinceStartup() < _downloadDeadline) return;
+
+  std::string const levelPath = _pendingDownloadLevelPath;
+  std::string const pcBundleFallback = _pendingDownloadPcFallback;
+  CancelPendingDownload();
+  PaperLogger.warn("Vivify asset download timed out for '{}'", levelPath);
+  if (levelPath != _selectedLevelPath) return;
+  if (!pcBundleFallback.empty()) {
+    ConvertPcBundleAsync(levelPath, pcBundleFallback);
+    return;
+  }
+  SongCore::API::PlayButton::DisablePlayButton("Vivify", "Asset download timed out.");
 }
 
 void Runtime::BeginBundleDownload(uint32_t checksum, std::string const& levelPath,
                                   std::string const& pcBundleFallback) {
   SongCore::API::PlayButton::DisablePlayButton("Vivify", "Downloading assets...");
-  DownloadBundle(checksum, levelPath, [this, levelPath, pcBundleFallback](bool success) {
+  CancelPendingDownload();
+  int const generation = _downloadGeneration;
+  _downloadDeadline = UnityEngine::Time::get_realtimeSinceStartup() + kAssetDownloadTimeoutSeconds;
+  _pendingDownloadLevelPath = levelPath;
+  _pendingDownloadPcFallback = pcBundleFallback;
+
+  DownloadBundle(checksum, levelPath, [this, generation, levelPath, pcBundleFallback](bool success) {
+    // A newer selection (or the timeout) already moved on from this download.
+    if (generation != _downloadGeneration) return;
+    CancelPendingDownload();
     if (levelPath != _selectedLevelPath) return;
     if (success) {
       std::string downloaded = ResolveBundlePath(levelPath);
@@ -327,7 +386,8 @@ void Runtime::BeginBundleDownload(uint32_t checksum, std::string const& levelPat
 void Runtime::ConvertPcBundleAsync(std::string const& levelPath, std::string const& sourceBundlePath) {
   if (!GetConvertPcBundlesOnDevice()) {
     PaperLogger.warn("Vivify found a PC asset bundle but on-device conversion is disabled: '{}'", sourceBundlePath);
-    SongCore::API::PlayButton::DisablePlayButton("Vivify", "No Android asset bundle for this map.");
+    SongCore::API::PlayButton::DisablePlayButton("Vivify",
+                                                 "PC bundle found; enable Convert PC Bundles On Device in settings.");
     return;
   }
 
@@ -373,7 +433,7 @@ void Runtime::ConvertPcBundleAsync(std::string const& levelPath, std::string con
       }
       if (levelPath != _selectedLevelPath) return;
       if (!usable) {
-        SongCore::API::PlayButton::DisablePlayButton("Vivify", "Could not convert this map's PC assets.");
+        SongCore::API::PlayButton::DisablePlayButton("Vivify", "Convert failed: " + statusText);
         return;
       }
       _selectedBundlePath = loadPath;

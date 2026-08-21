@@ -127,10 +127,23 @@ and repacks it uncompressed. Unity then accepts and enumerates the bundle.
   Song folders are never modified. Writes go to a `.part` file and are renamed
   into place, so an interrupted conversion can't leave a truncated file that a
   later run mistakes for a finished one.
-- Bundle resolution order is now: the map's own Android bundle → download the
-  real Android build by its `android2021` checksum → convert a PC bundle. A
-  downloaded Android build is always preferred, and a failed download now falls
-  back to conversion instead of just giving up.
+- Bundle resolution order is: the map's own Android bundle → a bundle already
+  converted on this device → download the real Android build by its
+  `android2021` checksum → convert the PC bundle. An already-converted bundle
+  deliberately outranks the download: a map that ships a PC bundle usually has
+  no Android build in the repo to fetch (that is *why* it only ships a PC
+  bundle), so checking the network first meant a converted map could sit on
+  "Downloading assets..." with a perfectly good converted bundle unused in the
+  cache.
+- Downloads now time out after 45s and fall back to conversion. WebUtils does
+  not promise a callback on every failure mode, so a request that never
+  resolved previously left the play button disabled for the rest of the
+  session.
+- Every path that leaves the play button disabled now names its own reason
+  ("Convert failed: unsupported bundle compression", "Asset download timed
+  out", "PC bundle found; enable Convert PC Bundles On Device in settings",
+  …), and level selection always logs one line to `Vivify.log` recording the
+  Android bundle, PC bundle, checksum, cache path and decision taken.
 
 **Convert All PC Bundles Now.** Per-level conversion runs on level *selection*,
 not on play, so it does not need a playable map — but it does need you to be

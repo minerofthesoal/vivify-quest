@@ -138,6 +138,10 @@ inline constexpr std::string_view kCreateScreenTextureEvent = "CreateScreenTextu
 inline constexpr std::string_view kSetCameraPropertyEvent = "SetCameraProperty"sv;
 inline constexpr std::string_view kSetRenderingSettingsEvent = "SetRenderingSettings"sv;
 inline constexpr std::string_view kMainCameraId = "_Main"sv;
+// How long to wait on a bundle download before giving up and converting a PC
+// bundle instead. Generous enough for a slow connection, short enough that a
+// request that never resolves does not strand the level.
+inline constexpr float kAssetDownloadTimeoutSeconds = 45.0f;
 inline constexpr int kMaxActiveBlitEffects = 96;
 inline constexpr int kMaxRenderTextureSize = 4096;
 inline constexpr float kMaxTrailDuration = 2.0f;
