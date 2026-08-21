@@ -34,3 +34,27 @@ jobs:
           echo "::error::mod.json version ($MOD_VERSION) and qpm.json info.version ($QPM_VERSION) are out of sync"
           exit 1
         fi
+
+  bundle-converter-tests:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Build the converter for the host, with sanitizers
+      run: |
+        g++ -std=c++20 -O1 -g -fsanitize=address,undefined \
+            -I include -o /tmp/conv \
+            tools/bundleconvert/main.cpp src/VivifyBundleConvert.cpp
+
+    - name: Round-trip and structure tests
+      working-directory: tools/bundleconvert
+      env:
+        VIVIFY_CONV: /tmp/conv
+      run: python3 run_tests.py
+
+    - name: Corruption fuzz pass
+      working-directory: tools/bundleconvert
+      env:
+        VIVIFY_CONV: /tmp/conv
+      run: python3 fuzz.py

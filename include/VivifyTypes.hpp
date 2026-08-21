@@ -133,16 +133,6 @@ inline constexpr std::string_view kSetGlobalPropertyEvent = "SetGlobalProperty"s
 inline constexpr std::string_view kAssignObjectPrefabEvent = "AssignObjectPrefab"sv;
 inline constexpr std::string_view kBlitEvent = "Blit"sv;
 
-// Ported from the rbatteries1-design/Lars27110 base. Note-visual replacement
-// prefabs are cosmetic only, but without an explicit layer they inherit the
-// original note's layer (or whatever the AssetBundle happened to export).
-// That leaves them on Beat Saber's raycast/physics-active note layer, where
-// they can be picked up by saber-collision and clash-detection raycasts that
-// scan by layer -- in maps with arcs and saber-clash/burn-mark effects this
-// was observed to make those effects intermittently stop registering.
-// Layer 4 is Unity's built-in "Ignore Raycast" layer, which keeps the
-// replacement mesh purely visual.
-inline constexpr int kVisualOnlyLayer = 4;
 inline constexpr std::string_view kCreateCameraEvent = "CreateCamera"sv;
 inline constexpr std::string_view kCreateScreenTextureEvent = "CreateScreenTexture"sv;
 inline constexpr std::string_view kSetCameraPropertyEvent = "SetCameraProperty"sv;

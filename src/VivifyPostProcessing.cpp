@@ -235,6 +235,20 @@ UnityEngine::Rendering::CommandBuffer* Runtime::BuildMidRenderCommandBuffer(
   }
 
   cb->Blit(ToTargetId(mainCurrent), dstId);
+
+  // CommandBuffer.Blit binds its destination as a colour-only render target, so
+  // once this buffer has run the camera is left rendering into the camera
+  // target with no depth attachment for the rest of the frame. Everything the
+  // camera still has to draw after this CameraEvent -- which for
+  // BeforeForwardAlpha/AfterForwardOpaque and earlier is all the transparent
+  // geometry: arcs, saber trails, note debris -- then has no depth buffer to
+  // test or write against and drops out. That is why arcs disappear only on
+  // maps that use a mid-render Blit.
+  //
+  // SetRenderTarget(rt) with a single identifier re-binds rt as BOTH the colour
+  // and the depth surface with LoadAction.Load, so the camera's own depth
+  // contents survive and the rest of the frame renders normally.
+  cb->SetRenderTarget(CameraTargetId());
   return cb;
 }
 
