@@ -126,7 +126,7 @@ private:
                                                                 std::string_view context) const;
   void LogMaterialShader(std::string_view context, std::string_view assetPath, UnityEngine::Material* material) const;
   UnityEngine::Shader* FindUsableShader(std::string const& shaderName) const;
-  UnityEngine::Shader* FindFallbackShader() const;
+  UnityEngine::Shader* FindFallbackShader();
   void RepairMaterialShader(UnityEngine::Material* material, std::string_view context = {});
   void RepairGameObjectMaterials(UnityEngine::GameObject* gameObject, std::string_view context = {});
   void ApplyStereoKeywords(UnityEngine::Material* material) const;
@@ -238,6 +238,9 @@ private:
   std::string ComputeSaberFingerprint(std::vector<AssignedPrefabInfo*> const& modelInfos,
                                       std::vector<AssignedPrefabInfo*> const& trailInfos) const;
   bool ReplacementIntact(VisualReplacement const& replacement) const;
+  // True if any spawned renderer would actually draw, i.e. has a material
+  // whose shader this GPU can run.
+  bool ReplacementCanRender(VisualReplacement const& replacement) const;
   void ReassertNoteReplacement(GlobalNamespace::NoteController* noteController, VisualReplacement& replacement);
   bool AssignmentMatchesTracks(AssignedPrefabInfo const& info, GlobalNamespace::NoteData* noteData);
   void AddAssignedPrefab(std::string_view objectType, AssignedPrefabKind kind, std::string asset,
@@ -382,6 +385,13 @@ private:
 
   // In-flight asset download. WebUtils does not guarantee a callback on every
   // failure mode, so the play button is not left waiting on one forever.
+  // Generic shader used when a bundle's own shader cannot run on this GPU.
+  // Resolved lazily from the shaders actually loaded in the process.
+  UnityEngine::Shader* _fallbackShader = nullptr;
+  int _shaderRepairAttempts = 0;
+  int _shaderRepairSucceeded = 0;
+  int _shaderRepairFailed = 0;
+
   int _downloadGeneration = 0;
   float _downloadDeadline = -1.0f;
   std::string _pendingDownloadLevelPath;

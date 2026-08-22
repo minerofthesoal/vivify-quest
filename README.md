@@ -89,23 +89,20 @@ single-identifier overload re-binds the target as both colour *and* depth with
 
 Two separate defects stacked here.
 
-**The bundle was never found.** Bundle discovery only ever matched files with a
-`.vivify` extension. That is what this port's *own* download path writes
-(`bundleAndroid2021.vivify`), but a map authored for PC ships whatever Vivify's
-Unity exporter produced — commonly `bundleWindows2019` or `bundleWindows2021`
-with **no extension at all**. So on exactly the maps a conversion path exists to
-rescue, no bundle was detected: the map reported "This map does not support your
-game version", the play button stayed disabled, and there was nothing to offer
-for conversion. The old fallback's own `IsWindowsBundlePath` check looked for
-"bundlewindows" in a path that could only ever end in `.vivify` — it could never
-have fired.
+**Discovery is now by content.** Bundle discovery previously matched only files
+with a `.vivify` extension.
 
-Discovery is now by **content**: any file in the song folder is accepted if it
-starts with the `UnityFS` signature, whatever it is called. Names are used only
-to rank candidates. As a side effect, maps shipping an *Android* bundle without
-the `.vivify` extension now load too.
+*Correction: an earlier version of this section claimed PC bundles ship without
+that extension and so were never found at all. That was wrong.* Upstream Vivify
+names them `bundle{Windows2019,Windows2021}.vivify`
+([`VivifyController.cs`](https://github.com/Aeroluna/Vivify/blob/master/Vivify/VivifyController.cs)),
+so the old scan did find them. Discovery is now by **content** anyway — any file
+in the song folder starting with the `UnityFS` signature qualifies, names only
+rank candidates — because that is robust to a mapper renaming a bundle, and it
+also picks up an *Android* bundle that is not named exactly
+`bundleAndroid2021.vivify`. It was not the reason PC maps would not start.
 
-**The fallback could not have worked anyway.** The old "Allow Unsafe Windows
+**The fallback could not have worked.** The old "Allow Unsafe Windows
 Bundle Fallback" toggle handed the PC bundle straight to
 `AssetBundle.LoadFromFile`. Unity does not reject that outright on Android: it
 hands back a bundle object whose `GetAllAssetNames()` is empty — exactly the
@@ -164,6 +161,39 @@ All PC Bundles Now** button that walks every installed custom level (including
 WIP levels), converts everything convertible in one background pass, and reports
 progress under the button. Nothing needs to be selected or playable for it to
 run, and already-converted maps are skipped.
+
+### Converted bundles rendering nothing — no models, invisible notes and sabers
+
+A converted bundle loaded and its assets enumerated, but nothing it contained
+drew: no models, invisible blocks, invisible sabers. Two independent bugs in the
+shader-repair path, either of which alone is enough to cause it.
+
+**Broken shaders were classified as fine.** `RepairMaterialShader` left a
+material alone when its shader reported `isSupported == false` but
+`Material.passCount > 0`. `passCount` counts the passes *declared* in the
+shader's subshaders, which a DirectX-only shader still has on Android even
+though it carries no GLES program — so every unusable shader took that early
+return, was recorded as repaired, and kept a shader that draws nothing. The
+check now requires `isSupported`.
+
+**The fallback shader never existed.** When a material did get as far as being
+repaired, the replacement came from `Shader.Find` over `"Unlit/Texture"`,
+`"Unlit/Color"`, `"Sprites/Default"` and `"Standard"`. `Shader.Find` only
+resolves shaders included in the build, and Unity strips built-in shaders
+nothing references, so in Beat Saber's IL2CPP build all four return null and the
+repair silently gave up. Vivify now enumerates the shaders the process has
+actually loaded (`Resources.FindObjectsOfTypeAll<Shader>`), scores them, and
+caches the best stand-in; the chosen shader is logged.
+
+**Belt and braces.** A replacement prefab now only hides the note, saber or
+debris it stands in for once at least one of its spawned renderers has a
+material whose shader this GPU can run. If a bundle's shading cannot be
+rescued, you get the default block or saber rather than nothing at all — this
+class of bug can no longer make gameplay objects disappear.
+
+Asset loading is also wrapped per-asset: a converted PC bundle carries DirectX
+shader programs and BC/DXT texture data this GPU cannot consume, and one asset
+throwing as it is realised no longer takes the rest of the bundle with it.
 
 **What conversion can and cannot rescue.** Meshes, prefabs, GameObject
 hierarchies, animations, animator controllers, audio, text assets and material
