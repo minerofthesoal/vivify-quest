@@ -535,8 +535,22 @@ void Runtime::CacheBundleAssets() {
     if (!assetName) continue;
     std::string originalAssetPath = il2cpp_utils::detail::to_string(assetName);
     std::string key = NormalizeAssetKey(originalAssetPath);
-    auto asset = _mainBundle->LoadAsset(assetName);
-    if (asset == nullptr) {
+
+    // One bad asset must not take the whole bundle (or the game) down. A
+    // converted PC bundle in particular carries DirectX shader programs and
+    // BC/DXT texture data that this GPU cannot consume, and those surface here
+    // as the asset is realised.
+    UnityEngine::Object* asset = nullptr;
+    try {
+      asset = _mainBundle->LoadAsset(assetName).unsafePtr();
+    } catch (std::exception const& ex) {
+      PaperLogger.warn("Vivify asset load threw, skipping: path='{}' error={}", originalAssetPath, ex.what());
+      continue;
+    } catch (...) {
+      PaperLogger.warn("Vivify asset load threw, skipping: path='{}'", originalAssetPath);
+      continue;
+    }
+    if (!IsAlive(asset)) {
       if (GetVivifyDebugLogging()) {
         PaperLogger.warn("Vivify asset load failed: path='{}'", originalAssetPath);
       }
@@ -549,16 +563,16 @@ void Runtime::CacheBundleAssets() {
       if (!nameKey.empty() && !_assetsByName.contains(nameKey)) {
         _assetsByName[nameKey] = asset;
       }
-      if (auto* shader = il2cpp_utils::try_cast<UnityEngine::Shader>(asset.unsafePtr()).value_or(nullptr);
+      if (auto* shader = il2cpp_utils::try_cast<UnityEngine::Shader>(asset).value_or(nullptr);
           IsAlive(shader) && shader->get_isSupported() && !nameKey.empty()) {
         _supportedShadersByName[nameKey] = shader;
       }
     }
     if (GetVivifyDebugLogging()) {
-      if (auto* material = il2cpp_utils::try_cast<UnityEngine::Material>(asset.unsafePtr()).value_or(nullptr);
+      if (auto* material = il2cpp_utils::try_cast<UnityEngine::Material>(asset).value_or(nullptr);
           IsAlive(material)) {
         LogMaterialShader("bundle-load", originalAssetPath, material);
-      } else if (auto* shader = il2cpp_utils::try_cast<UnityEngine::Shader>(asset.unsafePtr()).value_or(nullptr);
+      } else if (auto* shader = il2cpp_utils::try_cast<UnityEngine::Shader>(asset).value_or(nullptr);
                  IsAlive(shader)) {
         PaperLogger.info("Vivify shader asset: path='{}' shader='{}' supported={}",
                          originalAssetPath, ShaderNameForLog(shader), BoolText(shader->get_isSupported()));
@@ -721,21 +735,87 @@ UnityEngine::Shader* Runtime::FindUsableShader(std::string const& shaderName) co
   return nullptr;
 }
 
-UnityEngine::Shader* Runtime::FindFallbackShader() const {
-  static constexpr std::string_view fallbackNames[] = {
-      "Unlit/Texture"sv,
-      "Unlit/Color"sv,
-      "Sprites/Default"sv,
-      "Standard"sv,
+// Picks a shader that can stand in for one the GPU cannot run.
+//
+// This used to ask Shader.Find for "Unlit/Texture", "Unlit/Color",
+// "Sprites/Default" and "Standard". Shader.Find only resolves shaders that are
+// actually included in the build (or already loaded from a bundle), and Unity
+// strips built-in shaders nothing references -- so in Beat Saber's IL2CPP build
+// every one of those lookups returns null, the repair silently gave up, and the
+// material kept a shader that draws nothing. That is why converted bundles came
+// up with no models: the meshes and renderers were all there, but every
+// material was bound to a dead shader.
+//
+// Enumerating the shaders the process has actually loaded finds something real.
+UnityEngine::Shader* Runtime::FindFallbackShader() {
+  if (IsAlive(_fallbackShader) && _fallbackShader->get_isSupported()) {
+    return _fallbackShader;
+  }
+  _fallbackShader = nullptr;
+
+  // Names worth trying directly, cheapest first. Beat Saber's own shaders come
+  // before Unity's built-ins because they are the ones actually present.
+  static constexpr std::string_view preferredNames[] = {
+      "Custom/SimpleLit"sv, "Custom/Glowing"sv,     "BeatSaber/Unlit Glow"sv,
+      "Unlit/Texture"sv,    "Unlit/Color"sv,        "Sprites/Default"sv,
+      "UI/Default"sv,       "Standard"sv,
   };
-  for (auto name : fallbackNames) {
-    auto shader = UnityEngine::Shader::Find(StringW(std::string(name)));
-    auto* rawShader = shader.unsafePtr();
-    if (IsAlive(rawShader) && rawShader->get_isSupported()) {
-      return rawShader;
+  for (auto name : preferredNames) {
+    auto* candidate = UnityEngine::Shader::Find(StringW(std::string(name))).unsafePtr();
+    if (IsAlive(candidate) && candidate->get_isSupported()) {
+      _fallbackShader = candidate;
+      PaperLogger.info("Vivify fallback shader: using '{}'", ShaderNameForLog(candidate));
+      return _fallbackShader;
     }
   }
-  return nullptr;
+
+  // Nothing by name -- score every shader currently loaded and take the best.
+  auto scoreShader = [](std::string const& lowerName) -> int {
+    // Shaders that exist but would draw nothing useful for arbitrary geometry.
+    static constexpr std::string_view excluded[] = {
+        "hidden/"sv,   "internal"sv, "text"sv,   "font"sv,    "skybox"sv,
+        "shadow"sv,    "depth"sv,    "blit"sv,   "postpro"sv, "compositor"sv,
+        "cursor"sv,    "mask"sv,     "stencil"sv, "occlusion"sv,
+    };
+    for (auto bad : excluded) {
+      if (lowerName.find(bad) != std::string::npos) return -1;
+    }
+    if (lowerName.find("unlit") != std::string::npos) return 100;
+    if (lowerName.find("simplelit") != std::string::npos) return 90;
+    if (lowerName.find("standard") != std::string::npos) return 80;
+    if (lowerName.find("glow") != std::string::npos) return 70;
+    if (lowerName.find("lit") != std::string::npos) return 60;
+    if (lowerName.find("sprite") != std::string::npos) return 30;
+    if (lowerName.find("ui/") != std::string::npos) return 20;
+    return 10;
+  };
+
+  int bestScore = 0;
+  auto allShaders = UnityEngine::Resources::FindObjectsOfTypeAll<UnityEngine::Shader*>();
+  if (allShaders) {
+    for (int i = 0; i < allShaders.size(); i++) {
+      auto* candidate = allShaders[i];
+      if (!IsAlive(candidate) || !candidate->get_isSupported()) continue;
+      auto name = candidate->get_name();
+      if (!name) continue;
+      std::string lowerName = ToStdString(name);
+      std::transform(lowerName.begin(), lowerName.end(), lowerName.begin(),
+                     [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+      int const score = scoreShader(lowerName);
+      if (score <= bestScore) continue;
+      bestScore = score;
+      _fallbackShader = candidate;
+    }
+  }
+
+  if (IsAlive(_fallbackShader)) {
+    PaperLogger.info("Vivify fallback shader: scanned loaded shaders, using '{}' (score {})",
+                     ShaderNameForLog(_fallbackShader), bestScore);
+  } else {
+    PaperLogger.error("Vivify fallback shader: no usable shader found; assets with unsupported "
+                      "shaders will not render");
+  }
+  return _fallbackShader;
 }
 
 void Runtime::RepairMaterialShader(UnityEngine::Material* material, std::string_view context) {
@@ -756,12 +836,21 @@ void Runtime::RepairMaterialShader(UnityEngine::Material* material, std::string_
                      BoolText(IsInternalErrorShaderName(originalShaderName)),
                      originalPassCount);
   }
-  if (IsAlive(rawShader) && !IsInternalErrorShaderName(originalShaderName) &&
-      (rawShader->get_isSupported() || originalPassCount > 0)) {
+  // A shader is only left alone if the GPU says it can actually run it.
+  //
+  // The "|| originalPassCount > 0" escape hatch that used to be here made every
+  // converted PC bundle render nothing: Material.passCount reports the passes
+  // declared in the shader's subshaders, which a DirectX-only shader still has
+  // on Android even though it carries no GLES program. So every broken shader
+  // took this early return, was recorded as repaired, and kept a shader that
+  // draws nothing.
+  if (IsAlive(rawShader) && rawShader->get_isSupported() &&
+      !IsInternalErrorShaderName(originalShaderName)) {
     ApplyStereoKeywords(material);
     _repairedMaterials.emplace(material);
     return;
   }
+  _shaderRepairAttempts++;
   auto fallbackState = CaptureMaterialFallbackState(material);
   UnityEngine::Shader* replacement = nullptr;
   if (IsAlive(rawShader)) {
@@ -777,14 +866,18 @@ void Runtime::RepairMaterialShader(UnityEngine::Material* material, std::string_
     material->set_shader(replacement);
     RestoreMaterialFallbackState(material, fallbackState);
     ApplyStereoKeywords(material);
+    _shaderRepairSucceeded++;
     if (GetVivifyDebugLogging()) {
       PaperLogger.info("Vivify shader repaired: context={} material='{}' from='{}' to='{}' preservedColor={} preservedTexture={}",
                        context, ToStdString(material->get_name()), originalShaderName, ShaderNameForLog(replacement),
                        BoolText(fallbackState.color.has_value()), BoolText(IsManagedAlive(fallbackState.mainTexture)));
     }
-  } else if (GetVivifyDebugLogging()) {
-    PaperLogger.warn("Vivify shader repair failed: context={} material='{}' original='{}'",
-                     context, ToStdString(material->get_name()), originalShaderName);
+  } else {
+    _shaderRepairFailed++;
+    if (GetVivifyDebugLogging()) {
+      PaperLogger.warn("Vivify shader repair failed: context={} material='{}' original='{}'",
+                       context, ToStdString(material->get_name()), originalShaderName);
+    }
   }
   _repairedMaterials.emplace(material);
 }
@@ -844,6 +937,9 @@ void Runtime::RefreshLoadedMaterialStereoKeywords() {
 }
 
 void Runtime::RepairLoadedMaterialShaders() {
+  _shaderRepairAttempts = 0;
+  _shaderRepairSucceeded = 0;
+  _shaderRepairFailed = 0;
   for (auto const& [path, asset] : _assets) {
     if (!IsAlive(asset)) continue;
     if (auto* material = il2cpp_utils::try_cast<UnityEngine::Material>(asset).value_or(nullptr); IsAlive(material)) {
@@ -851,6 +947,13 @@ void Runtime::RepairLoadedMaterialShaders() {
     } else if (auto* gameObject = il2cpp_utils::try_cast<UnityEngine::GameObject>(asset).value_or(nullptr); IsAlive(gameObject)) {
       RepairGameObjectMaterials(gameObject, path);
     }
+  }
+  if (_shaderRepairAttempts > 0) {
+    // Worth logging unconditionally: a bundle whose shaders all had to be
+    // replaced is a converted PC bundle rendering with stand-in shading, and a
+    // non-zero failure count means some of it will not draw at all.
+    PaperLogger.info("Vivify shader repair: {} material(s) had an unusable shader, {} replaced, {} could not be",
+                     _shaderRepairAttempts, _shaderRepairSucceeded, _shaderRepairFailed);
   }
 }
 

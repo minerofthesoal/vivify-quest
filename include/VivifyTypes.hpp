@@ -49,6 +49,7 @@
 #include "UnityEngine/QualitySettings.hpp"
 #include "UnityEngine/Quaternion.hpp"
 #include "UnityEngine/RenderBuffer.hpp"
+#include "UnityEngine/Resources.hpp"
 #include "UnityEngine/RenderSettings.hpp"
 #include "UnityEngine/RenderTexture.hpp"
 #include "UnityEngine/RenderTextureDescriptor.hpp"

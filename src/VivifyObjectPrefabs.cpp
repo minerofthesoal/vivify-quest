@@ -313,6 +313,25 @@ bool Runtime::ReplacementIntact(VisualReplacement const& replacement) const {
   return true;
 }
 
+// A replacement prefab is only worth hiding the original for if it can actually
+// be drawn. If a bundle's shaders cannot run on this GPU and no stand-in could
+// be found, hiding the original would leave nothing on screen at all -- an
+// invisible note is far worse than one wearing the default look.
+bool Runtime::ReplacementCanRender(VisualReplacement const& replacement) const {
+  for (auto* renderer : replacement.replacementRenderers) {
+    if (!IsAlive(renderer)) continue;
+    auto materials = renderer->get_sharedMaterials();
+    if (!materials) continue;
+    for (int i = 0; i < materials.size(); i++) {
+      auto* material = materials[i].unsafePtr();
+      if (!IsAlive(material)) continue;
+      auto* shader = material->get_shader().unsafePtr();
+      if (IsAlive(shader) && shader->get_isSupported()) return true;
+    }
+  }
+  return false;
+}
+
 void Runtime::ReassertNoteReplacement(GlobalNamespace::NoteController* noteController,
                                       VisualReplacement& replacement) {
 
@@ -875,7 +894,7 @@ void Runtime::ReplaceNoteVisuals(GlobalNamespace::NoteController* noteController
   }
 
   VisualReplacement replacement;
-  bool const hideOriginal = ShouldHideOriginal(validInfos);
+  bool hideOriginal = ShouldHideOriginal(validInfos);
   auto originalRenderers = noteController->GetComponentsInChildren<UnityEngine::Renderer*>(true);
   for (auto* info : validInfos) {
     InstantiateReplacementPrefab(*info, replacementParent, replacement, /*inheritParentLayer=*/true);
@@ -883,6 +902,13 @@ void Runtime::ReplaceNoteVisuals(GlobalNamespace::NoteController* noteController
   if (replacement.spawnedObjects.empty() && replacement.disabledRenderers.empty()) {
     VIVIFY_DEBUG("Vivify note replace: {} valid prefab(s) but nothing spawned/hidden", validInfos.size());
     return;
+  }
+
+  bool const canRender = ReplacementCanRender(replacement);
+  if (hideOriginal && !canRender) {
+    PaperLogger.warn("Vivify note replace: no spawned renderer has a usable shader, keeping the default note "
+                     "visible instead of hiding it behind nothing");
+    hideOriginal = false;
   }
 
   auto* mpb = GetReplacementMaterialPropertyBlockController(noteController, replacementParent);
@@ -981,11 +1007,19 @@ void Runtime::ApplySaberVisuals(GlobalNamespace::SaberModelController* smc, Glob
   }
 
   VisualReplacement replacement;
-  if (ShouldHideOriginal(validModelInfos)) {
-    DisableOriginalRenderers(smc->get_gameObject(), replacement);
-  }
+  // Capture the saber's own renderers before spawning, since the replacement is
+  // parented under the same GameObject and must not be swept up by this list.
+  auto originalRenderers = smc->get_gameObject()->GetComponentsInChildren<UnityEngine::Renderer*>(true);
   for (auto* info : validModelInfos) {
     InstantiateReplacementPrefab(*info, parent, replacement);
+  }
+  if (ShouldHideOriginal(validModelInfos)) {
+    if (ReplacementCanRender(replacement)) {
+      DisableOriginalRenderers(originalRenderers, replacement);
+    } else {
+      PaperLogger.warn("Vivify saber replace (type {}): no spawned renderer has a usable shader, keeping the "
+                       "default saber visible", type);
+    }
   }
   ApplySaberTrailVisuals(smc, validTrailInfos, replacement);
   ApplySaberReplacementColor(smc, saber, replacement, true);
@@ -1070,12 +1104,13 @@ void Runtime::ReplaceDebrisVisuals(GlobalNamespace::NoteDebris* debris) {
   if (!IsAlive(parent)) return;
 
   VisualReplacement replacement;
-  bool const hideOriginal = ShouldHideOriginal(validInfos);
-  if (hideOriginal) {
-    DisableOriginalRenderers(debris->get_gameObject(), replacement);
-  }
+  auto originalRenderers = debris->get_gameObject()->GetComponentsInChildren<UnityEngine::Renderer*>(true);
   for (auto* info : validInfos) {
     InstantiateReplacementPrefab(*info, parent, replacement);
+  }
+  bool const hideOriginal = ShouldHideOriginal(validInfos) && ReplacementCanRender(replacement);
+  if (hideOriginal) {
+    DisableOriginalRenderers(originalRenderers, replacement);
   }
   ApplyReplacementRenderersToMaterialBlock(debris->get_gameObject(), replacement, hideOriginal);
   if (!replacement.spawnedObjects.empty() || !replacement.disabledRenderers.empty()) {
