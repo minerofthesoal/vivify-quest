@@ -1,28 +1,21 @@
-# Build and temp directories
-build/
-temp_qmod/
-extern/
+```
+# Dependencies
 .qpm/
 
-# Private / user settings
-ndkpath.txt
-qpm.private.json
-CMakeUserPresets.json
+# Build artifacts
+dist/
+build/
+target/
+
+# Logs and temp files
+*.log
+*.tmp
+
+# Environment
+.env
+*.env
+
+# Editors
 .vscode/
-
-# Compiled outputs
-*.qmod
-*.so
-*.dll
-*.exe
-*.o
-*.obj
-
-# Converter test scratch
-tools/bundleconvert/work/
-__pycache__/
-*.pyc
-
-# OS generated files
-.DS_Store
-Thumbs.db
+.idea/
+```

@@ -220,11 +220,10 @@ Please test in-game, especially on maps that previously showed them.
 
 ## Building
 
-I don't have an Android NDK toolchain or access to the QPM package registry
-(`qpackages.com`) in the environment this was built in, so **the mod itself has
+I don't have an Android NDK toolchain in the environment this was built in, so **the mod itself has
 not been compiled**. To build it yourself:
 
-1. Install [QPM](https://github.com/QuestPackageManager/QPM.CLI) and the Beat
+1. Install [QPM.CLI](https://github.com/QuestPackageManager/QPM.CLI) and the Beat
    Saber Quest modding toolchain (Android NDK, CMake/Ninja) — see the
    [BSMG modding docs](https://bsmg.wiki/quest/quest-modding-intro.html) if
    you don't already have this set up.
@@ -232,6 +231,10 @@ not been compiled**. To build it yourself:
 3. `qpm s build` (or your usual `pwsh scripts/build.ps1`)
 4. Package with `scripts/createqmod.ps1`, or `qpm s qmod`.
 5. Test on-device (`adb`/QuestPatcher install).
+
+For packages unavailable through QPM, download the dependency from its GitHub
+repository and place it in your project's `extern` directory, then update your
+`qpm.json`/build files manually.
 
 The GitHub Actions workflow in `.github/workflows/build.yml` does all of this
 on push to `main` and on pull requests.
