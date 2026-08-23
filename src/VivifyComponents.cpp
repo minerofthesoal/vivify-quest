@@ -290,30 +290,72 @@ UnityEngine::Camera* SecondaryCameraController::GetCamera() {
   return _camera;
 }
 
+// Creates (or re-creates) the per-eye capture texture for this camera.
+//
+// Depth captures use RenderTextureFormat::RFloat rather than a depth format,
+// matching what upstream Vivify's DepthBlit material writes on PC. A map's
+// shader samples the texture it named in CreateCamera as an ordinary single
+// channel float; handing it a depth-format texture instead reads back as
+// something else entirely, which is why depth-driven effects (raymarchers)
+// produced nothing at all.
+UnityEngine::RenderTexture* SecondaryCameraController::EnsureEyeTexture(
+    std::unordered_map<int, UnityEngine::RenderTexture*>& textures, int eye, UnityEngine::RenderTexture* src,
+    bool depth) {
+  if (!IsManagedAlive(src)) return nullptr;
+  auto it = textures.find(eye);
+  UnityEngine::RenderTexture* tex = (it != textures.end()) ? it->second : nullptr;
+  bool const mismatch = !IsManagedAlive(tex) || tex->get_width() != src->get_width() ||
+                        tex->get_height() != src->get_height() || tex->get_vrUsage() != src->get_vrUsage();
+  if (!mismatch) return tex;
+
+  if (IsManagedAlive(tex)) {
+    tex->Release();
+    UnityEngine::Object::Destroy(tex);
+  }
+  auto descriptor = src->get_descriptor();
+  descriptor.set_msaaSamples(1);
+  if (depth) {
+    descriptor.set_colorFormat(UnityEngine::SystemInfo::SupportsRenderTextureFormat(UnityEngine::RenderTextureFormat::RFloat)
+                                   ? UnityEngine::RenderTextureFormat::RFloat
+                                   : UnityEngine::RenderTextureFormat::ARGBHalf);
+    descriptor.set_depthBufferBits(0);
+  }
+  tex = UnityEngine::RenderTexture::New_ctor(descriptor);
+  if (!IsManagedAlive(tex)) return nullptr;
+  tex->Create();
+  textures[eye] = tex;
+  return tex;
+}
+
 void SecondaryCameraController::OnRenderImage(UnityEngine::RenderTexture* src, UnityEngine::RenderTexture* dest) {
   auto* camera = GetCamera();
   int const stereoActiveEye = IsManagedAlive(camera) ? camera->get_stereoActiveEye().value__ : 0;
 
-  if (colorKey.has_value() && IsManagedAlive(src)) {
-    auto it = colorTextures.find(stereoActiveEye);
-    UnityEngine::RenderTexture* tex = (it != colorTextures.end()) ? it->second : nullptr;
-    bool const mismatch = !IsManagedAlive(tex) || tex->get_width() != src->get_width() ||
-                          tex->get_height() != src->get_height() || tex->get_vrUsage() != src->get_vrUsage();
-    if (mismatch) {
-      if (IsManagedAlive(tex)) {
-        tex->Release();
-        UnityEngine::Object::Destroy(tex);
-      }
-      auto descriptor = src->get_descriptor();
-      descriptor.set_msaaSamples(1);
-      tex = UnityEngine::RenderTexture::New_ctor(descriptor);
-      if (IsManagedAlive(tex)) {
-        tex->Create();
-        colorTextures[stereoActiveEye] = tex;
-      }
-    }
-    if (IsManagedAlive(tex)) {
+  if (colorKey.has_value()) {
+    if (auto* tex = EnsureEyeTexture(colorTextures, stereoActiveEye, src, false); IsManagedAlive(tex)) {
       UnityEngine::Graphics::Blit(src, tex);
+    }
+  }
+
+  if (depthKey.has_value()) {
+    if (auto* tex = EnsureEyeTexture(depthTextures, stereoActiveEye, src, true); IsManagedAlive(tex)) {
+      // Copy the camera's depth texture into the RFloat target. Upstream does
+      // this with its own DepthBlit shader, which is shipped as a Windows-built
+      // AssetBundle and so cannot be reused here; BuiltinRenderTextureType::Depth
+      // names the same source and the default blit copies it without needing a
+      // shader of our own.
+      auto* cb = UnityEngine::Rendering::CommandBuffer::New_ctor();
+      if (cb != nullptr) {
+        UnityEngine::Rendering::RenderTargetIdentifier depthSource{};
+        depthSource._ctor(UnityEngine::Rendering::BuiltinRenderTextureType::Depth);
+        UnityEngine::Rendering::RenderTargetIdentifier depthTarget =
+            UnityEngine::Rendering::RenderTargetIdentifier::op_Implicit___UnityEngine__Rendering__RenderTargetIdentifier(
+                static_cast<UnityEngine::Texture*>(tex));
+        cb->Blit(depthSource, depthTarget);
+        UnityEngine::Graphics::ExecuteCommandBuffer(cb);
+        cb->ReleaseBuffer();
+        cb->Dispose();
+      }
     }
   }
 
@@ -321,13 +363,15 @@ void SecondaryCameraController::OnRenderImage(UnityEngine::RenderTexture* src, U
 }
 
 void SecondaryCameraController::OnDestroy() {
-  for (auto& [eye, tex] : colorTextures) {
-    if (IsManagedAlive(tex)) {
-      tex->Release();
-      UnityEngine::Object::Destroy(tex);
+  for (auto* textures : {&colorTextures, &depthTextures}) {
+    for (auto& [eye, tex] : *textures) {
+      if (IsManagedAlive(tex)) {
+        tex->Release();
+        UnityEngine::Object::Destroy(tex);
+      }
     }
+    textures->clear();
   }
-  colorTextures.clear();
 }
 
 void MultipassKeywordController::Awake() {

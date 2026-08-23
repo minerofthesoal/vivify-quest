@@ -481,6 +481,7 @@ void Runtime::ResetRuntime() {
   _currentGlobalProperties.clear();
   _currentGlobalKeywords.clear();
   _repairedMaterials.clear();
+  _fallbackShadedMaterials.clear();
   _assets.clear();
   _assetsByName.clear();
   _supportedShadersByName.clear();

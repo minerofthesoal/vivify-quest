@@ -195,6 +195,47 @@ Asset loading is also wrapped per-asset: a converted PC bundle carries DirectX
 shader programs and BC/DXT texture data this GPU cannot consume, and one asset
 throwing as it is realised no longer takes the rest of the bundle with it.
 
+### Raymarching / depth-driven effects doing nothing
+
+Effects that need scene depth — raymarchers above all — produced nothing. Three
+bugs in the `CreateCamera` depth path, checked against upstream's
+[`SecondaryCameraController.cs`](https://github.com/Aeroluna/Vivify/blob/master/Vivify/PostProcessing/SecondaryCameraController.cs)
+and [`PostProcessingController.cs`](https://github.com/Aeroluna/Vivify/blob/master/Vivify/PostProcessing/PostProcessingController.cs).
+
+**Wrong texture format.** The port wrote depth into a
+`RenderTextureFormat.Depth` render texture. Upstream writes
+`RenderTextureFormat.RFloat` — its `DepthBlit` material samples
+`_CameraDepthTexture` and stores it as a plain single-channel float. A map's
+shader samples the texture it named in `CreateCamera` expecting exactly that;
+a depth-format texture reads back as something else entirely. Depth is now
+captured as `RFloat`, copied from `BuiltinRenderTextureType.Depth` (upstream's
+`DepthBlit` shader ships as a Windows-built AssetBundle and cannot be reused
+here, but the built-in identifier names the same source and the default blit
+copies it without needing a shader).
+
+**Depth-only cameras were never wired up.** A raymarching map creates a camera
+that declares *only* a `depthTexture` — it wants scene depth, not a colour
+copy. That path never attached a `SecondaryCameraController`, so nothing ever
+captured anything; and `BindSecondaryCameraTextures` bailed out on
+`!texturePropertyId.has_value()`, so even a captured depth texture was never
+bound to the name the map's shader samples. Both now handle colour and depth
+independently, and the depth pass is forced on via `depthTextureMode` so
+`_CameraDepthTexture` actually exists.
+
+**`targetTexture` breaks stereo.** Secondary cameras were given a target
+texture (or explicit target buffers). Upstream deliberately does not, with the
+reason in a comment at the top of its controller: assigning a target texture
+disables stereo on the camera. Capture now happens per-eye in `OnRenderImage`,
+matching upstream.
+
+**Converted PC bundles cannot raymarch.** Worth stating plainly: none of the
+above rescues a screen effect from a converted Windows bundle, because the
+shader is DirectX bytecode with no GLES program and cannot be recompiled on
+device. Vivify now detects this case and *skips* the blit rather than running
+the material's stand-in shader, which would smear an unrelated shader across
+the whole frame. The effect is unavailable; the frame passes through untouched.
+Depth-driven effects need a bundle actually built for Android.
+
 **What conversion can and cannot rescue.** Meshes, prefabs, GameObject
 hierarchies, animations, animator controllers, audio, text assets and material
 *definitions* are stored platform-independently and come through intact.

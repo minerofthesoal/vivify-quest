@@ -117,7 +117,16 @@ public:
   std::unordered_map<int, UnityEngine::RenderTexture*> colorTextures;
   std::optional<int> colorKey;
 
+  // Per-eye scene depth, captured as RFloat to match what upstream Vivify's
+  // DepthBlit material produces on PC. Map shaders (raymarchers especially)
+  // sample this expecting a single float channel, not a depth-format texture.
+  std::unordered_map<int, UnityEngine::RenderTexture*> depthTextures;
+  std::optional<int> depthKey;
+
 private:
+  UnityEngine::RenderTexture* EnsureEyeTexture(std::unordered_map<int, UnityEngine::RenderTexture*>& textures,
+                                               int eye, UnityEngine::RenderTexture* src, bool depth);
+
   UnityEngine::Camera* _camera = nullptr;
 };
 
