@@ -1,14 +1,19 @@
+# Dependencies (restored by scripts/restore-deps.py)
+extern/
+.qpm/
+
 # Build and temp directories
 build/
 temp_qmod/
-extern/
-.qpm/
+dist/
+target/
 
 # Private / user settings
 ndkpath.txt
 qpm.private.json
 CMakeUserPresets.json
 .vscode/
+.idea/
 
 # Compiled outputs
 *.qmod
@@ -17,6 +22,14 @@ CMakeUserPresets.json
 *.exe
 *.o
 *.obj
+
+# Logs and temp files
+*.log
+*.tmp
+
+# Environment
+.env
+*.env
 
 # Converter test scratch
 tools/bundleconvert/work/
