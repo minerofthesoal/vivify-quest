@@ -195,6 +195,47 @@ Asset loading is also wrapped per-asset: a converted PC bundle carries DirectX
 shader programs and BC/DXT texture data this GPU cannot consume, and one asset
 throwing as it is realised no longer takes the rest of the bundle with it.
 
+### Raymarching / depth-driven effects doing nothing
+
+Effects that need scene depth — raymarchers above all — produced nothing. Three
+bugs in the `CreateCamera` depth path, checked against upstream's
+[`SecondaryCameraController.cs`](https://github.com/Aeroluna/Vivify/blob/master/Vivify/PostProcessing/SecondaryCameraController.cs)
+and [`PostProcessingController.cs`](https://github.com/Aeroluna/Vivify/blob/master/Vivify/PostProcessing/PostProcessingController.cs).
+
+**Wrong texture format.** The port wrote depth into a
+`RenderTextureFormat.Depth` render texture. Upstream writes
+`RenderTextureFormat.RFloat` — its `DepthBlit` material samples
+`_CameraDepthTexture` and stores it as a plain single-channel float. A map's
+shader samples the texture it named in `CreateCamera` expecting exactly that;
+a depth-format texture reads back as something else entirely. Depth is now
+captured as `RFloat`, copied from `BuiltinRenderTextureType.Depth` (upstream's
+`DepthBlit` shader ships as a Windows-built AssetBundle and cannot be reused
+here, but the built-in identifier names the same source and the default blit
+copies it without needing a shader).
+
+**Depth-only cameras were never wired up.** A raymarching map creates a camera
+that declares *only* a `depthTexture` — it wants scene depth, not a colour
+copy. That path never attached a `SecondaryCameraController`, so nothing ever
+captured anything; and `BindSecondaryCameraTextures` bailed out on
+`!texturePropertyId.has_value()`, so even a captured depth texture was never
+bound to the name the map's shader samples. Both now handle colour and depth
+independently, and the depth pass is forced on via `depthTextureMode` so
+`_CameraDepthTexture` actually exists.
+
+**`targetTexture` breaks stereo.** Secondary cameras were given a target
+texture (or explicit target buffers). Upstream deliberately does not, with the
+reason in a comment at the top of its controller: assigning a target texture
+disables stereo on the camera. Capture now happens per-eye in `OnRenderImage`,
+matching upstream.
+
+**Converted PC bundles cannot raymarch.** Worth stating plainly: none of the
+above rescues a screen effect from a converted Windows bundle, because the
+shader is DirectX bytecode with no GLES program and cannot be recompiled on
+device. Vivify now detects this case and *skips* the blit rather than running
+the material's stand-in shader, which would smear an unrelated shader across
+the whole frame. The effect is unavailable; the frame passes through untouched.
+Depth-driven effects need a bundle actually built for Android.
+
 **What conversion can and cannot rescue.** Meshes, prefabs, GameObject
 hierarchies, animations, animator controllers, audio, text assets and material
 *definitions* are stored platform-independently and come through intact.
@@ -220,21 +261,48 @@ Please test in-game, especially on maps that previously showed them.
 
 ## Building
 
-I don't have an Android NDK toolchain or access to the QPM package registry
-(`qpackages.com`) in the environment this was built in, so **the mod itself has
-not been compiled**. To build it yourself:
+I don't have an Android NDK toolchain in the environment this was built in, and
+`qpackages.com` is blocked by its egress policy, so **the mod itself has not
+been compiled**. To build it yourself:
 
-1. Install [QPM](https://github.com/QuestPackageManager/QPM.CLI) and the Beat
+1. Install [QPM.CLI](https://github.com/QuestPackageManager/QPM.CLI) and the Beat
    Saber Quest modding toolchain (Android NDK, CMake/Ninja) — see the
    [BSMG modding docs](https://bsmg.wiki/quest/quest-modding-intro.html) if
    you don't already have this set up.
-2. From this project's root: `qpm restore`
+2. From this project's root: `python3 scripts/restore-deps.py`
 3. `qpm s build` (or your usual `pwsh scripts/build.ps1`)
 4. Package with `scripts/createqmod.ps1`, or `qpm s qmod`.
 5. Test on-device (`adb`/QuestPatcher install).
 
+For packages unavailable through QPM, download the dependency from its GitHub
+repository and place it in your project's `extern` directory, then update your
+`qpm.json`/build files manually.
+
 The GitHub Actions workflow in `.github/workflows/build.yml` does all of this
 on push to `main` and on pull requests.
+
+### No qpackages.com
+
+`qpm restore` resolves every dependency through **qpackages.com**; if that
+registry is down or blocked, the project cannot be built at all. Step 2 above
+uses `scripts/restore-deps.py` instead, which resolves everything from
+**github.com only** using the manifest in `scripts/dependencies.json`, and
+regenerates `extern.cmake` from it. The generated `extern.cmake` is verified to
+carry exactly the same include directories and compile flags as the one qpm
+produces. CI does the same; the `qpm-action` step is kept only for the NDK.
+
+Thirteen of the nineteen dependencies were recoverable straight from
+`qpm.shared.json`, because they publish their native library as a GitHub release
+asset. Six headers-only packages record their repository *only* on
+qpackages.com, so `dependencies.json` currently leaves those `null` and
+`restore-deps.py` refuses to run until they are filled in. Run
+`python3 scripts/discover-deps.py` once against any `extern/` tree a previous
+`qpm restore` produced — it reads each package's own `qpm.json` and writes the
+repositories back into the manifest. Commit the result and the registry is out
+of the loop permanently.
+
+See [`scripts/README-deps.md`](scripts/README-deps.md) for the details,
+including how to vendor `extern/` outright for a build that needs no network.
 
 ## Testing the converter
 

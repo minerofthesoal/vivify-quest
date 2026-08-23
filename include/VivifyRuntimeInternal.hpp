@@ -388,6 +388,9 @@ private:
   // Generic shader used when a bundle's own shader cannot run on this GPU.
   // Resolved lazily from the shaders actually loaded in the process.
   UnityEngine::Shader* _fallbackShader = nullptr;
+  // Materials whose original shader could not run here and were given the
+  // generic stand-in. Fine for geometry, never valid for a full-screen blit.
+  std::unordered_set<UnityEngine::Material*> _fallbackShadedMaterials;
   int _shaderRepairAttempts = 0;
   int _shaderRepairSucceeded = 0;
   int _shaderRepairFailed = 0;

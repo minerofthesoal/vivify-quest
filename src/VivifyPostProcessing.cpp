@@ -347,6 +347,18 @@ bool Runtime::CanUseBlitMaterial(UnityEngine::Material* material, int pass) cons
   if (auto it = _blitMaterialValidCache.find(material); it != _blitMaterialValidCache.end()) {
     return it->second;
   }
+  if (_fallbackShadedMaterials.contains(material)) {
+    // The map's own post-processing shader could not run here and was replaced
+    // with a generic stand-in. A stand-in is fine on a mesh but meaningless as
+    // a screen effect -- running it would paint the frame with an unrelated
+    // shader. Skipping the blit leaves the frame untouched instead, which is
+    // the closest thing to "this effect is unavailable".
+    PaperLogger.warn("Vivify blit skipped: material '{}' is using a stand-in shader, so its screen effect "
+                     "cannot be reproduced (this is expected for a converted PC bundle)",
+                     ToStdString(material->get_name()));
+    _blitMaterialValidCache[material] = false;
+    return false;
+  }
   auto shader = material->get_shader();
   auto* rawShader = shader.unsafePtr();
   auto shaderName = ShaderNameForLog(rawShader);
@@ -670,81 +682,30 @@ void Runtime::HandleCreateCamera(rapidjson::Value const& json) {
     h = std::max(1, mainCam->get_pixelHeight());
   }
   bool const wantColor = cam.texturePropertyId.has_value();
-  bool const wantDepth = cam.depthTexturePropertyId.has_value() &&
-                         UnityEngine::SystemInfo::SupportsRenderTextureFormat(UnityEngine::RenderTextureFormat::Depth);
-  if (cam.depthTexturePropertyId.has_value() && !wantDepth && GetVivifyDebugLogging()) {
-    PaperLogger.warn("Vivify CreateCamera depth RT skipped: Depth RenderTextureFormat unsupported id='{}'", name);
-  }
+  bool const wantDepth = cam.depthTexturePropertyId.has_value();
+
   if (!wantColor && !wantDepth) {
-
     cam.camera->set_enabled(false);
-  } else if (wantColor) {
-
-    UnityEngine::RenderTextureDescriptor desc{};
-    desc._ctor(w, h, SupportedRenderTextureFormat(UnityEngine::RenderTextureFormat::ARGB32,
-                                                  "CreateCamera:color:" + name), wantDepth ? 0 : 24);
-    bool const stereo = IsAlive(mainCamPtr) && mainCamPtr->get_stereoEnabled();
-    if (stereo) {
-      desc.set_vrUsage(UnityEngine::VRTextureUsage::TwoEyes);
-    }
-    cam.colorRT = UnityEngine::RenderTexture::New_ctor(desc);
-    if (wantDepth) {
-      UnityEngine::RenderTextureDescriptor depthDesc{};
-      depthDesc._ctor(w, h, UnityEngine::RenderTextureFormat::Depth, 24);
-      if (stereo) {
-        depthDesc.set_vrUsage(UnityEngine::VRTextureUsage::TwoEyes);
-      }
-      cam.depthRT = UnityEngine::RenderTexture::New_ctor(depthDesc);
-    }
-    bool const ok = IsAlive(cam.colorRT) && cam.colorRT->Create() &&
-                    (!wantDepth || (IsAlive(cam.depthRT) && cam.depthRT->Create()));
-    if (!ok) {
-      if (GetVivifyDebugLogging()) {
-        PaperLogger.warn("Vivify CreateCamera color/depth RT failed: id='{}' size={}x{} stereo={} wantDepth={}",
-                         name, w, h, BoolText(stereo), BoolText(wantDepth));
-      }
-      ReleaseSecondaryCameraData(cam);
-      return;
-    }
-    ClearRenderTexture(cam.colorRT);
-    if (wantDepth) {
-      ClearRenderTexture(cam.depthRT);
-      cam.camera->SetTargetBuffers(cam.colorRT->get_colorBuffer(), cam.depthRT->get_depthBuffer());
-      UnityEngine::Shader::SetGlobalTexture(cam.depthTexturePropertyId.value(),
-                                            static_cast<UnityEngine::Texture*>(cam.depthRT));
-    } else {
-      cam.camera->set_targetTexture(cam.colorRT);
-    }
+  } else {
+    // Deliberately no targetTexture and no SetTargetBuffers here.
+    //
+    // Upstream Vivify puts the capture in SecondaryCameraController and notes
+    // why: assigning a target texture disables stereo on the camera. This port
+    // did assign one, which on a stereo headset is exactly the wrong thing --
+    // and for a camera that only asked for a depth texture it also skipped
+    // creating the controller altogether, so nothing ever captured anything.
+    // The camera now renders normally (one frame ahead of the main camera) and
+    // the controller copies what it needs out of OnRenderImage, per eye.
+    cam.camera->set_targetTexture(nullptr);
     cam.camera->set_enabled(true);
-    UnityEngine::Shader::SetGlobalTexture(cam.texturePropertyId.value(),
-                                          static_cast<UnityEngine::Texture*>(cam.colorRT));
 
     auto* controller = go->AddComponent<SecondaryCameraController*>();
-    if (IsAlive(controller) && GetVivifyDebugLogging()) {
-      PaperLogger.info("Vivify CreateCamera '{}': stereo={} colorVrUsage={} depthVrUsage={} size={}x{} depth={}",
-                       name, BoolText(stereo),
-                       IsAlive(cam.colorRT) ? cam.colorRT->get_vrUsage().value__ : -1,
-                       IsAlive(cam.depthRT) ? cam.depthRT->get_vrUsage().value__ : -1,
-                       w, h, BoolText(wantDepth));
+    if (IsAlive(controller)) {
+      controller->colorKey = cam.texturePropertyId;
+      controller->depthKey = cam.depthTexturePropertyId;
+    } else {
+      PaperLogger.warn("Vivify CreateCamera '{}': could not attach SecondaryCameraController", name);
     }
-  } else {
-
-    auto colorFormat = SupportedRenderTextureFormat(UnityEngine::RenderTextureFormat::ARGB32, "CreateCamera:color:" + name);
-    cam.colorRT = UnityEngine::RenderTexture::New_ctor(w, h, 0, colorFormat);
-    cam.depthRT = UnityEngine::RenderTexture::New_ctor(w, h, 24, UnityEngine::RenderTextureFormat::Depth);
-    bool const ok = IsAlive(cam.colorRT) && cam.colorRT->Create() && IsAlive(cam.depthRT) && cam.depthRT->Create();
-    if (!ok) {
-      if (GetVivifyDebugLogging()) {
-        PaperLogger.warn("Vivify CreateCamera depth RT failed: id='{}' size={}x{}", name, w, h);
-      }
-      ReleaseSecondaryCameraData(cam);
-      return;
-    }
-    ClearRenderTexture(cam.colorRT);
-    ClearRenderTexture(cam.depthRT);
-    cam.camera->SetTargetBuffers(cam.colorRT->get_colorBuffer(), cam.depthRT->get_depthBuffer());
-    UnityEngine::Shader::SetGlobalTexture(cam.depthTexturePropertyId.value(),
-                                          static_cast<UnityEngine::Texture*>(cam.depthRT));
   }
   if (GetVivifyDebugLogging()) {
     PaperLogger.info("Vivify CreateCamera: id='{}' colorTexture='{}' depthTexture='{}' size={}x{} mainEffect={}",
@@ -753,6 +714,20 @@ void Runtime::HandleCreateCamera(rapidjson::Value const& json) {
   }
   ApplyCameraProperties(cam.camera, cam.properties);
   ApplyCameraGameObjectProperties(cam.camera, cam.properties);
+
+  // A camera asked for a depth texture is useless without Unity generating one,
+  // and _CameraDepthTexture only exists when the camera's depthTextureMode says
+  // so. Upstream leaves this to the map declaring depthTextureMode itself;
+  // forcing the bit on costs nothing when it was already set and avoids an
+  // empty depth texture when the map forgot (or set it on a different camera).
+  if (wantDepth && !GetDisableCreateCameraDepth() && IsAlive(cam.camera)) {
+    int const mode = cam.camera->get_depthTextureMode().value__;
+    int const withDepth = mode | UnityEngine::DepthTextureMode::Depth.value__;
+    if (withDepth != mode) {
+      cam.camera->set_depthTextureMode(UnityEngine::DepthTextureMode(withDepth));
+    }
+  }
+
   _secondaryCameras[name] = std::move(cam);
 }
 
@@ -797,31 +772,45 @@ UnityEngine::RenderTexture* Runtime::SecondaryCameraColorRT(SecondaryCameraData 
   return controller->colorTextures.begin()->second;
 }
 
+// Rebinds every secondary camera's captured textures as global shader
+// properties for the eye about to be rendered, once per frame -- the same thing
+// upstream does from PostProcessingController.OnPreRender.
+//
+// This used to bail out on `!cam.texturePropertyId.has_value()`, so a camera
+// that declared only a depth texture -- which is precisely what a raymarching
+// map creates, since it wants scene depth rather than a colour copy -- was
+// skipped entirely and its depth texture was never bound to the name the map's
+// shader samples.
 void Runtime::BindSecondaryCameraTextures() {
   if (_secondaryCameras.empty()) return;
   auto* mainCam = IsAlive(_lastMainCameraGO) ? _lastMainCameraGO->GetComponent<UnityEngine::Camera*>() : nullptr;
   int const eye = IsAlive(mainCam) ? mainCam->get_stereoActiveEye().value__ : 0;
-  for (auto& [n, cam] : _secondaryCameras) {
-    if (!cam.texturePropertyId.has_value() || !IsAlive(cam.camera)) continue;
 
-    if (IsAlive(cam.colorRT)) {
-      UnityEngine::Shader::SetGlobalTexture(cam.texturePropertyId.value(),
-                                            static_cast<UnityEngine::Texture*>(cam.colorRT));
-      if (cam.depthTexturePropertyId.has_value() && IsAlive(cam.depthRT)) {
-        UnityEngine::Shader::SetGlobalTexture(cam.depthTexturePropertyId.value(),
-                                              static_cast<UnityEngine::Texture*>(cam.depthRT));
-      }
-      continue;
-    }
+  for (auto& [n, cam] : _secondaryCameras) {
+    if (!IsAlive(cam.camera)) continue;
+    if (!cam.texturePropertyId.has_value() && !cam.depthTexturePropertyId.has_value()) continue;
 
     auto* go = cam.camera->get_gameObject().unsafePtr();
     if (!IsAlive(go)) continue;
     auto* controller = go->GetComponent<SecondaryCameraController*>();
     if (!IsAlive(controller)) continue;
-    if (auto it = controller->colorTextures.find(eye); it != controller->colorTextures.end() && IsAlive(it->second)) {
-      UnityEngine::Shader::SetGlobalTexture(cam.texturePropertyId.value(),
+
+    auto bind = [eye](std::optional<int> const& propertyId,
+                      std::unordered_map<int, UnityEngine::RenderTexture*> const& textures) {
+      if (!propertyId.has_value() || textures.empty()) return;
+      auto it = textures.find(eye);
+      if (it == textures.end() || !IsManagedAlive(it->second)) {
+        // Before both eyes have been rendered once there may only be one
+        // texture; binding it is better than leaving the property unset.
+        it = textures.begin();
+        if (!IsManagedAlive(it->second)) return;
+      }
+      UnityEngine::Shader::SetGlobalTexture(propertyId.value(),
                                             static_cast<UnityEngine::Texture*>(it->second));
-    }
+    };
+
+    bind(cam.texturePropertyId, controller->colorTextures);
+    bind(cam.depthTexturePropertyId, controller->depthTextures);
   }
 }
 
@@ -860,17 +849,21 @@ void Runtime::ApplySecondaryCameraMainEffects(GlobalNamespace::MainEffectControl
   for (auto& [name, cam] : _secondaryCameras) {
 
     if (!cam.properties.mainEffect.value_or(false)) continue;
-    if (!IsAlive(cam.colorRT)) continue;
-    auto desc = cam.colorRT->get_descriptor();
+    // Secondary cameras no longer own a single RenderTexture -- capture is
+    // per-eye and lives on the controller -- so resolve the texture for the eye
+    // currently being rendered.
+    auto* colorRT = SecondaryCameraColorRT(cam);
+    if (!IsAlive(colorRT)) continue;
+    auto desc = colorRT->get_descriptor();
     desc.set_msaaSamples(1);
     desc.set_depthBufferBits(0);
     auto temp = UnityEngine::RenderTexture::GetTemporary(desc);
     auto* tempPtr = temp.unsafePtr();
     if (!IsManagedAlive(tempPtr)) continue;
     mainEffectController->OnPreRender();
-    mainEffectSO->Render(cam.colorRT, tempPtr, mainEffectController->____fadeValue);
+    mainEffectSO->Render(colorRT, tempPtr, mainEffectController->____fadeValue);
     mainEffectController->OnPostRender();
-    UnityEngine::Graphics::Blit(static_cast<UnityEngine::Texture*>(tempPtr), cam.colorRT);
+    UnityEngine::Graphics::Blit(static_cast<UnityEngine::Texture*>(tempPtr), colorRT);
     UnityEngine::RenderTexture::ReleaseTemporary(tempPtr);
   }
 }

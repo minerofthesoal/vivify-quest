@@ -867,6 +867,13 @@ void Runtime::RepairMaterialShader(UnityEngine::Material* material, std::string_
     RestoreMaterialFallbackState(material, fallbackState);
     ApplyStereoKeywords(material);
     _shaderRepairSucceeded++;
+    if (replacement == _fallbackShader) {
+      // Remember that this material is only wearing a stand-in. Substituting a
+      // generic shader lets a mesh be seen, but doing the same for a
+      // full-screen blit would smear an unrelated shader over the whole frame,
+      // so CanUseBlitMaterial refuses these outright and the blit is skipped.
+      _fallbackShadedMaterials.emplace(material);
+    }
     if (GetVivifyDebugLogging()) {
       PaperLogger.info("Vivify shader repaired: context={} material='{}' from='{}' to='{}' preservedColor={} preservedTexture={}",
                        context, ToStdString(material->get_name()), originalShaderName, ShaderNameForLog(replacement),
