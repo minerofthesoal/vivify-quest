@@ -27,9 +27,14 @@ jobs:
       uses: Fernthedev/qpm-action@v1
       with:
         workflow_token: ${{ secrets.GITHUB_TOKEN }}
-        restore: true
+        # Dependencies come from scripts/restore-deps.py (github.com only), not
+        # from qpackages.com. This step is kept purely for the Android NDK.
+        restore: false
         cache: true
         resolve_ndk: true
+
+    - name: Restore dependencies (github.com only, no qpackages.com)
+      run: python3 scripts/restore-deps.py
 
     - name: Build
       run: qpm s build

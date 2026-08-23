@@ -261,21 +261,44 @@ Please test in-game, especially on maps that previously showed them.
 
 ## Building
 
-I don't have an Android NDK toolchain or access to the QPM package registry
-(`qpackages.com`) in the environment this was built in, so **the mod itself has
-not been compiled**. To build it yourself:
+I don't have an Android NDK toolchain in the environment this was built in, and
+`qpackages.com` is blocked by its egress policy, so **the mod itself has not
+been compiled**. To build it yourself:
 
 1. Install [QPM](https://github.com/QuestPackageManager/QPM.CLI) and the Beat
    Saber Quest modding toolchain (Android NDK, CMake/Ninja) — see the
    [BSMG modding docs](https://bsmg.wiki/quest/quest-modding-intro.html) if
    you don't already have this set up.
-2. From this project's root: `qpm restore`
+2. From this project's root: `python3 scripts/restore-deps.py`
 3. `qpm s build` (or your usual `pwsh scripts/build.ps1`)
 4. Package with `scripts/createqmod.ps1`, or `qpm s qmod`.
 5. Test on-device (`adb`/QuestPatcher install).
 
 The GitHub Actions workflow in `.github/workflows/build.yml` does all of this
 on push to `main` and on pull requests.
+
+### No qpackages.com
+
+`qpm restore` resolves every dependency through **qpackages.com**; if that
+registry is down or blocked, the project cannot be built at all. Step 2 above
+uses `scripts/restore-deps.py` instead, which resolves everything from
+**github.com only** using the manifest in `scripts/dependencies.json`, and
+regenerates `extern.cmake` from it. The generated `extern.cmake` is verified to
+carry exactly the same include directories and compile flags as the one qpm
+produces. CI does the same; the `qpm-action` step is kept only for the NDK.
+
+Thirteen of the nineteen dependencies were recoverable straight from
+`qpm.shared.json`, because they publish their native library as a GitHub release
+asset. Six headers-only packages record their repository *only* on
+qpackages.com, so `dependencies.json` currently leaves those `null` and
+`restore-deps.py` refuses to run until they are filled in. Run
+`python3 scripts/discover-deps.py` once against any `extern/` tree a previous
+`qpm restore` produced — it reads each package's own `qpm.json` and writes the
+repositories back into the manifest. Commit the result and the registry is out
+of the loop permanently.
+
+See [`scripts/README-deps.md`](scripts/README-deps.md) for the details,
+including how to vendor `extern/` outright for a build that needs no network.
 
 ## Testing the converter
 

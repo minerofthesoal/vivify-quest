@@ -1,0 +1,239 @@
+{
+  "_comment": [
+    "Self-contained dependency manifest for scripts/restore-deps.py.",
+    "Everything here resolves against github.com only; qpackages.com is never contacted.",
+    "Entries with \"repo\": null still need their source repository filled in --",
+    "run scripts/discover-deps.py once against an existing extern/ to complete them."
+  ],
+  "externDir": "extern",
+  "dependencies": [
+    {
+      "id": "beatsaber-hook",
+      "version": "6.4.2",
+      "repo": "QuestPackageManager/beatsaber-hook",
+      "ref": "version/v6_4_2",
+      "headersOnly": false,
+      "soLink": "https://github.com/QuestPackageManager/beatsaber-hook/releases/download/v6.4.2/libbeatsaber-hook.so",
+      "debugSoLink": "https://github.com/QuestPackageManager/beatsaber-hook/releases/download/v6.4.2/debug_libbeatsaber-hook.so",
+      "modLink": "https://github.com/QuestPackageManager/beatsaber-hook/releases/download/v6.4.2/beatsaber-hook.qmod",
+      "overrideSoName": "libbeatsaber-hook.so",
+      "compileOptions": {
+        "cppFlags": [
+          "-Wno-extra-qualification"
+        ]
+      }
+    },
+    {
+      "id": "bs-cordl",
+      "version": "4008.0.0",
+      "repo": "QuestPackageManager/bs-cordl",
+      "ref": "version/v4008_0_0",
+      "headersOnly": true,
+      "compileOptions": {
+        "includePaths": [
+          "include"
+        ],
+        "cppFeatures": [],
+        "cppFlags": [
+          "-DNEED_UNSAFE_CSHARP",
+          "-fdeclspec",
+          "-DUNITY_2021",
+          "-DHAS_CODEGEN",
+          "-Wno-invalid-offsetof"
+        ]
+      }
+    },
+    {
+      "id": "bsml",
+      "version": "0.4.55",
+      "repo": "bsq-ports/Quest-BSML",
+      "ref": "version/v0_4_55",
+      "headersOnly": false,
+      "soLink": "https://github.com/bsq-ports/Quest-BSML/releases/download/v0.4.55/libbsml.so",
+      "debugSoLink": "https://github.com/bsq-ports/Quest-BSML/releases/download/v0.4.55/debug_libbsml.so",
+      "modLink": "https://github.com/bsq-ports/Quest-BSML/releases/download/v0.4.55/BSML.qmod",
+      "overrideSoName": "libbsml.so"
+    },
+    {
+      "id": "conditional-dependencies",
+      "version": "0.3.0",
+      "repo": null,
+      "ref": "version/v0_3_0",
+      "headersOnly": true,
+      "cmake": false
+    },
+    {
+      "id": "config-utils",
+      "version": "2.0.3",
+      "repo": "darknight1050/config-utils",
+      "ref": "version/v2_0_3",
+      "headersOnly": true,
+      "soLink": "https://github.com/darknight1050/config-utils/releases/download/v2.0.3/libconfig-utils_test.so",
+      "overrideSoName": "libconfig-utils_test.so"
+    },
+    {
+      "id": "cpp-semver",
+      "version": "0.1.2",
+      "repo": null,
+      "ref": "version-v0.1.2",
+      "headersOnly": true
+    },
+    {
+      "id": "custom-json-data",
+      "version": "0.24.5",
+      "repo": "bsq-ports/CustomJSONData",
+      "ref": "version/v0_24_5",
+      "headersOnly": false,
+      "soLink": "https://github.com/bsq-ports/CustomJSONData/releases/download/v0.24.5/libcustom-json-data.so",
+      "debugSoLink": "https://github.com/bsq-ports/CustomJSONData/releases/download/v0.24.5/debug_libcustom-json-data.so",
+      "modLink": "https://github.com/bsq-ports/CustomJSONData/releases/download/v0.24.5/custom-json-data.qmod",
+      "overrideSoName": "libcustom-json-data.so",
+      "compileOptions": {
+        "cppFlags": [
+          "-DRAPIDJSON_NEON"
+        ]
+      }
+    },
+    {
+      "id": "custom-types",
+      "version": "0.18.4",
+      "repo": "QuestPackageManager/Il2CppQuestTypePatching",
+      "ref": "version/v0_18_4",
+      "headersOnly": false,
+      "soLink": "https://github.com/QuestPackageManager/Il2CppQuestTypePatching/releases/download/v0.18.4/libcustom-types.so",
+      "debugSoLink": "https://github.com/QuestPackageManager/Il2CppQuestTypePatching/releases/download/v0.18.4/debug_libcustom-types.so",
+      "modLink": "https://github.com/QuestPackageManager/Il2CppQuestTypePatching/releases/download/v0.18.4/CustomTypes.qmod",
+      "overrideSoName": "libcustom-types.so",
+      "compileOptions": {
+        "cppFlags": [
+          "-Wno-invalid-offsetof"
+        ]
+      }
+    },
+    {
+      "id": "fmt",
+      "version": "11.0.2",
+      "repo": null,
+      "ref": "version/v11_0_2",
+      "headersOnly": true,
+      "compileOptions": {
+        "systemIncludes": [
+          "fmt/include/"
+        ],
+        "cppFlags": [
+          "-DFMT_HEADER_ONLY"
+        ]
+      }
+    },
+    {
+      "id": "libil2cpp",
+      "version": "0.4.0",
+      "repo": null,
+      "ref": null,
+      "headersOnly": true,
+      "compileOptions": {
+        "systemIncludes": [
+          "il2cpp/libil2cpp",
+          "il2cpp/external/baselib/Include",
+          "il2cpp/external/baselib/Platforms/Android/Include"
+        ]
+      }
+    },
+    {
+      "id": "metacore",
+      "version": "1.6.3",
+      "repo": "Metalit/MetaCore",
+      "ref": "version/v1_6_3",
+      "headersOnly": false,
+      "soLink": "https://github.com/Metalit/MetaCore/releases/download/v1.6.3/libmetacore.so",
+      "modLink": "https://github.com/Metalit/MetaCore/releases/download/v1.6.3/MetaCore.qmod",
+      "overrideSoName": "libmetacore.so"
+    },
+    {
+      "id": "paper2_scotland2",
+      "version": "4.7.0",
+      "repo": "Fernthedev/paperlog",
+      "ref": "version/v4_7_0",
+      "headersOnly": false,
+      "soLink": "https://github.com/Fernthedev/paperlog/releases/download/v4.7.0/libpaper2_scotland2.so",
+      "modLink": "https://github.com/Fernthedev/paperlog/releases/download/v4.7.0/paper2_scotland2.qmod",
+      "overrideSoName": "libpaper2_scotland2.so",
+      "compileOptions": {
+        "systemIncludes": [
+          "shared/utfcpp/source"
+        ]
+      },
+      "cmake": false
+    },
+    {
+      "id": "rapidjson-macros",
+      "version": "2.1.0",
+      "repo": null,
+      "ref": "version/v2_1_0",
+      "headersOnly": true,
+      "cmake": false
+    },
+    {
+      "id": "scotland2",
+      "version": "0.1.7",
+      "repo": "sc2ad/scotland2",
+      "ref": "version/v0_1_7",
+      "headersOnly": false,
+      "soLink": "https://github.com/sc2ad/scotland2/releases/download/v0.1.7/libsl2.so",
+      "debugSoLink": "https://github.com/sc2ad/scotland2/releases/download/v0.1.7/debug_libsl2.so",
+      "overrideSoName": "libsl2.so"
+    },
+    {
+      "id": "sombrero",
+      "version": "0.1.43",
+      "repo": null,
+      "ref": "version/v0_1_43",
+      "headersOnly": true
+    },
+    {
+      "id": "songcore",
+      "version": "1.1.26",
+      "repo": "raineaeternal/Quest-SongCore",
+      "ref": "version/v1_1_26",
+      "headersOnly": false,
+      "soLink": "https://github.com/raineaeternal/Quest-SongCore/releases/download/v1.1.26/libsongcore.so",
+      "debugSoLink": "https://github.com/raineaeternal/Quest-SongCore/releases/download/v1.1.26/debug_libsongcore.so",
+      "modLink": "https://github.com/raineaeternal/Quest-SongCore/releases/download/v1.1.26/SongCore.qmod",
+      "overrideSoName": "libsongcore.so"
+    },
+    {
+      "id": "tinyxml2",
+      "version": "10.0.0",
+      "repo": "MillzyDev/NDK-tinyxml2",
+      "ref": "version/v10_0_0",
+      "headersOnly": false,
+      "soLink": "https://github.com/MillzyDev/NDK-tinyxml2/releases/download/v10.0.0/libtinyxml2.so",
+      "debugSoLink": "https://github.com/MillzyDev/NDK-tinyxml2/releases/download/v10.0.0/debug_libtinyxml2.so",
+      "modLink": "https://github.com/MillzyDev/NDK-tinyxml2/releases/download/v10.0.0/tinyxml2.qmod",
+      "overrideSoName": "libtinyxml2.so"
+    },
+    {
+      "id": "tracks",
+      "version": "2.5.4",
+      "repo": "bsq-ports/Tracks",
+      "ref": "version/v2_5_4",
+      "headersOnly": false,
+      "soLink": "https://github.com/bsq-ports/Tracks/releases/download/v2.5.4/libtracks.so",
+      "debugSoLink": "https://github.com/bsq-ports/Tracks/releases/download/v2.5.4/debug_libtracks.so",
+      "modLink": "https://github.com/bsq-ports/Tracks/releases/download/v2.5.4/Tracks.qmod",
+      "overrideSoName": "libtracks.so"
+    },
+    {
+      "id": "web-utils",
+      "version": "0.6.8",
+      "repo": "bsq-ports/WebUtils",
+      "ref": "version/v0_6_8",
+      "headersOnly": false,
+      "soLink": "https://github.com/bsq-ports/WebUtils/releases/download/v0.6.8/libweb-utils.so",
+      "debugSoLink": "https://github.com/bsq-ports/WebUtils/releases/download/v0.6.8/debug_libweb-utils.so",
+      "modLink": "https://github.com/bsq-ports/WebUtils/releases/download/v0.6.8/WebUtils.qmod",
+      "overrideSoName": "libweb-utils.so",
+      "cmake": false
+    }
+  ]
+}
