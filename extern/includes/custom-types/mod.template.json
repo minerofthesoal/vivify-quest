@@ -1,0 +1,17 @@
+{
+  "_QPVersion": "0.1.1",
+  "name": "custom-types",
+  "id": "${mod_id}",
+  "author": "Sc2ad",
+  "version": "${version}",
+  "description": "Core mod required for other mods to function!",
+  "coverImage": "cover.png",
+  "dependencies": [],
+  "modFiles": [],
+  "libraryFiles": [
+    "${binary}"
+  ],
+  "fileCopies": [],
+  "copyExtensions": [],
+  "isLibrary": true
+}

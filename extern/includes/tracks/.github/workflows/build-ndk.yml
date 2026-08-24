@@ -1,0 +1,80 @@
+name: NDK build
+
+env:
+  module_id: tracks
+  qmodName: Tracks
+  cache-name: tracks_cache
+
+on:
+  push:
+    branches: [ master ]
+  pull_request:
+    branches: [ master ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - uses: actions/checkout@v2
+        name: Checkout
+        with:
+          submodules: true
+          lfs: true
+
+      - uses: seanmiddleditch/gha-setup-ninja@v3
+
+      # - name: Create ndkpath.txt
+      #   run: |
+      #     echo "$ANDROID_NDK_LATEST_HOME" > ${GITHUB_WORKSPACE}/ndkpath.txt
+      #     cat ${GITHUB_WORKSPACE}/ndkpath.txt
+
+      - name: QPM Rust Action
+        uses: Fernthedev/qpm-rust-action@v1
+        with:
+          #required
+          workflow_token: ${{secrets.GITHUB_TOKEN}}
+
+          restore: true # will run restore on download
+          cache: true #will cache dependencies
+
+          # Name of qmod in release asset. Assumes exists, same as prior
+          qpm_qmod: ${{env.qmodName}}.qmod
+
+      - name: QPM Collapse
+        run: |
+          qpm-rust collapse
+
+      - name: Setup Rust
+        run: |
+          rustup install nightly
+          rustup target add aarch64-linux-android --toolchain nightly
+          cargo install --locked --git https://github.com/bbqsrc/cargo-ndk.git cargo-ndk 
+
+      - name: Build
+        run: |
+          cd ${GITHUB_WORKSPACE}
+          qpm-rust s build
+          qpm-rust qmod zip
+
+      - name: Get Library Name
+        id: libname
+        run: |
+          cd ./build/
+          pattern="lib${module_id}*.so"
+          files=( $pattern )
+          echo ::set-output name=NAME::"${files[0]}"
+          
+      - name: Upload non-debug artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.libname.outputs.NAME }}
+          path: ./build/${{ steps.libname.outputs.NAME }}
+          if-no-files-found: error
+
+      - name: Upload qmod artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{env.qmodName}}.qmod
+          path: ./${{ env.qmodName }}.qmod
+          if-no-files-found: error

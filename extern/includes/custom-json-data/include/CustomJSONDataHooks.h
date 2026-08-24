@@ -1,0 +1,25 @@
+#pragma once
+
+#include "beatsaber-hook/shared/utils/logging.hpp"
+#include "beatsaber-hook/shared/utils/hooking.hpp"
+#include "CJDLogger.h"
+
+namespace CustomJSONData {
+
+void InstallHooks();
+
+void InstallBeatmapHooks();
+
+namespace v2 {
+void InstallHooks();
+}
+
+namespace v3 {
+void InstallHooks();
+}
+
+namespace v4 {
+void InstallHooks();
+}
+
+} // namespace CustomJSONData

@@ -1,85 +1,52 @@
 ```
-# External includes and dependencies
-extern/includes/
+# Dependencies
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
 
-# Build artifacts and libraries
-extern/libs/
-
-# Compressed files
-*.zip
-*.gz
-*.tar
-*.tgz
-*.bz2
-*.xz
-*.7z
-*.rar
-*.zst
-*.lz4
-*.lzh
-*.cab
-*.arj
-*.rpm
-*.deb
-*.Z
-*.lz
-*.lzo
-*.tar.gz
-*.tar.bz2
-*.tar.xz
-*.tar.zst
-
-# Unity/BS related files
-*.unitypackage
-*.meta
-
-# Configuration and temporary files
-*.tmp
-*.temp
+# Logs and temp files
 *.log
-
-# Editor/IDE files
-.vscode/
-.idea/
+*.tmp
 *.swp
 *.swo
 
-# System files
-.DS_Store
-Thumbs.db
-
-# Environment files
+# Environment
 .env
 .env.local
 *.env.*
 
-# Dependency directories (if any subdirectories exist within extern that follow common patterns)
-node_modules/
-__pycache__/
-*.egg-info/
-.Python
+# Editors
+.vscode/
+.idea/
+
+# Coverage
 .coverage
 coverage/
-
-# C++ specific
-*.so
-*.a
-*.dylib
-*.dll
-*.exe
-
-# Build system files
-cmake-build-*/
-build/
-dist/
-target/
-.gradle/
-.mypy_cache/
-.pytest_cache/
 htmlcov/
-.coverage
 
-# Zip files (like types.json.zip)
-*.zip
+# Python specific
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
 
+# Backup files
+*.bak
+*~
 ```

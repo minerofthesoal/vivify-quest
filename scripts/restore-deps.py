@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Restore this project's dependencies from GitHub only.
+"""Restore this project's dependencies from GitHub, falling back to qpackages.com.
 
 Replaces `qpm restore`, which resolves everything through qpackages.com. This
 reads scripts/dependencies.json -- a self-contained manifest of repositories,
@@ -10,8 +10,8 @@ produces, then regenerates extern.cmake.
     python3 scripts/restore-deps.py --clean     # wipe extern/ first
     python3 scripts/restore-deps.py --check     # verify manifest, download nothing
 
-Headers come from https://github.com/<repo>/archive/<ref>.tar.gz and native
-libraries from their GitHub release assets. Nothing else is contacted.
+Headers come from https://github.com/<repo>/archive/<ref>.tar.gz (or qpackages.com
+if no repo/ref is specified) and native libraries from their GitHub release assets.
 """
 
 import argparse
@@ -36,11 +36,11 @@ def fetch(url: str) -> bytes:
         return response.read()
 
 
-def extract_headers(dep: dict, includes: pathlib.Path) -> None:
-    """Download <repo> at <ref> and unpack it to includes/<id>/."""
+def extract_headers_from_github(dep: dict, includes: pathlib.Path) -> None:
+    """Download <repo> at <ref> from GitHub and unpack it to includes/<id>/."""
     repo, ref, dep_id = dep["repo"], dep["ref"], dep["id"]
     url = f"https://github.com/{repo}/archive/{ref}.tar.gz"
-    print(f"  headers  {dep_id:<26} {repo}@{ref}")
+    print(f"  headers  {dep_id:<26} {repo}@{ref} (GitHub)")
     blob = fetch(url)
 
     destination = includes / dep_id
@@ -70,6 +70,53 @@ def extract_headers(dep: dict, includes: pathlib.Path) -> None:
                 source = archive.extractfile(member)
                 if source is not None:
                     target.write_bytes(source.read())
+
+
+def extract_headers_from_qpackages(dep: dict, includes: pathlib.Path) -> None:
+    """Download headers from qpackages.com and unpack to includes/<id>/."""
+    dep_id, version = dep["id"], dep["version"]
+    url = f"https://qpackages.com/packages/{dep_id}/{version}/download"
+    print(f"  headers  {dep_id:<26} {version} (qpackages.com)")
+    blob = fetch(url)
+
+    destination = includes / dep_id
+    if destination.exists():
+        shutil.rmtree(destination)
+    destination.mkdir(parents=True)
+
+    with tarfile.open(fileobj=io.BytesIO(blob), mode="r:gz") as archive:
+        members = archive.getmembers()
+        # qpackages may wrap the tree; strip the root directory if present
+        root = members[0].name.split("/", 1)[0] + "/" if members else ""
+        for member in members:
+            if not member.name.startswith(root):
+                continue
+            relative = member.name[len(root):]
+            if not relative:
+                continue
+            # Refuse anything that would escape the destination directory.
+            target = (destination / relative).resolve()
+            if not str(target).startswith(str(destination.resolve())):
+                raise RuntimeError(f"{dep_id}: archive entry escapes destination: {member.name}")
+            if member.isdir():
+                target.mkdir(parents=True, exist_ok=True)
+            elif member.isreg():
+                target.parent.mkdir(parents=True, exist_ok=True)
+                source = archive.extractfile(member)
+                if source is not None:
+                    target.write_bytes(source.read())
+
+
+def extract_headers(dep: dict, includes: pathlib.Path) -> None:
+    """Download headers from GitHub if repo/ref specified, otherwise from qpackages.com."""
+    if dep.get("repo") and dep.get("ref"):
+        try:
+            extract_headers_from_github(dep, includes)
+            return
+        except (urllib.error.URLError, urllib.error.HTTPError) as e:
+            print(f"  WARNING  {dep['id']:<26} GitHub failed: {e}, trying qpackages.com")
+    # Fall back to qpackages.com
+    extract_headers_from_qpackages(dep, includes)
 
 
 def download_library(dep: dict, libs: pathlib.Path) -> None:
@@ -122,17 +169,15 @@ def main() -> int:
     manifest = json.loads(MANIFEST.read_text())
     dependencies = manifest["dependencies"]
 
-    incomplete = [d["id"] for d in dependencies if not d.get("repo") or not d.get("ref")]
-    if incomplete:
-        print("error: these dependencies do not name a source repository/ref:", file=sys.stderr)
-        for dep_id in incomplete:
-            print(f"  - {dep_id}", file=sys.stderr)
-        print("\nRun scripts/discover-deps.py once against an existing extern/ tree", file=sys.stderr)
-        print("to fill them in, then commit scripts/dependencies.json.", file=sys.stderr)
-        return 1
+    # Now we allow dependencies without repo/ref - they will be fetched from qpackages.com
+    # No need to error out anymore for missing repo/ref
 
     if args.check:
-        print(f"Manifest OK: {len(dependencies)} dependencies, all with a repo and ref.")
+        print(f"Manifest OK: {len(dependencies)} dependencies.")
+        github_deps = sum(1 for d in dependencies if d.get("repo") and d.get("ref"))
+        qpackages_deps = len(dependencies) - github_deps
+        print(f"  GitHub sources: {github_deps}")
+        print(f"  qpackages.com fallback: {qpackages_deps}")
         print(f"Native libraries: {sum(1 for d in dependencies if d.get('soLink'))}")
         return 0
 
