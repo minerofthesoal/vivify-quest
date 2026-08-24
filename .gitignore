@@ -1,52 +1,41 @@
 ```
-# Dependencies
-__pycache__/
-*.pyc
-*.pyo
-*.pyd
+# Build artifacts and generated includes
+extern/includes/bs-cordl/include/
+*.hpp
+*.h
+*.def.hpp
+*.impl.hpp
 
-# Logs and temp files
-*.log
-*.tmp
-*.swp
-*.swo
+# Compressed archives
+*.zip
+*.gz
+*.tar
+*.tgz
+*.bz2
+*.xz
+*.7z
+*.rar
+*.zst
+*.lz4
+*.lzh
+*.cab
+*.arj
+*.rpm
+*.deb
+*.Z
+*.lz
+*.lzo
+*.tar.gz
+*.tar.bz2
+*.tar.xz
+*.tar.zst
 
-# Environment
-.env
-.env.local
-*.env.*
+# JSON zip
+types.json.zip
 
-# Editors
-.vscode/
-.idea/
+# Configuration
+qpm.json
+qpm.shared.json
+version.txt
 
-# Coverage
-.coverage
-coverage/
-htmlcov/
-
-# Python specific
-*.py[cod]
-*$py.class
-*.so
-.Python
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
-*.egg-info/
-.installed.cfg
-*.egg
-
-# Backup files
-*.bak
-*~
 ```
