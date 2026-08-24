@@ -8,6 +8,16 @@ on:
   pull_request:
     branches: [ main, master ]
   workflow_dispatch:
+    inputs:
+      version:
+        description: 'Override version number (optional, defaults to mod.json version)'
+        required: false
+        default: ''
+      use_qpackages:
+        description: 'Use qpackages.com along with github.com for dependencies'
+        required: false
+        default: 'false'
+        type: boolean
 
 permissions:
   contents: write
@@ -27,14 +37,24 @@ jobs:
       uses: Fernthedev/qpm-action@v1
       with:
         workflow_token: ${{ secrets.GITHUB_TOKEN }}
-        # Dependencies come from scripts/restore-deps.py (github.com only), not
-        # from qpackages.com. This step is kept purely for the Android NDK.
-        restore: false
+        # By default, restore is false (github.com only via restore-deps.py).
+        # If use_qpackages is enabled, let qpm restore dependencies from qpackages.com
+        # in addition to github.com sources.
+        restore: ${{ github.event.inputs.use_qpackages == 'true' }}
         cache: true
         resolve_ndk: true
 
     - name: Restore dependencies (github.com only, no qpackages.com)
+      if: github.event.inputs.use_qpackages != 'true'
       run: python3 scripts/restore-deps.py
+
+    - name: Restore dependencies (github.com + qpackages.com)
+      if: github.event.inputs.use_qpackages == 'true'
+      run: |
+        # First restore from github.com using our manifest
+        python3 scripts/restore-deps.py
+        # Then let qpm restore any additional/missing packages from qpackages.com
+        qpm restore
 
     - name: Build
       run: qpm s build
@@ -45,7 +65,11 @@ jobs:
     - name: Read mod version
       id: mod_version
       run: |
-        VERSION=$(python3 -c "import json; print(json.load(open('mod.json'))['version'])")
+        if [ -n "${{ github.event.inputs.version }}" ]; then
+          VERSION="${{ github.event.inputs.version }}"
+        else
+          VERSION=$(python3 -c "import json; print(json.load(open('mod.json'))['version'])")
+        fi
         echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
     - name: Rename QMOD artifact
