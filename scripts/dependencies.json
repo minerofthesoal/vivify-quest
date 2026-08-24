@@ -2,8 +2,9 @@
   "_comment": [
     "Self-contained dependency manifest for scripts/restore-deps.py.",
     "Everything here resolves against github.com only; qpackages.com is never contacted.",
-    "Entries with \"repo\": null still need their source repository filled in --",
-    "run scripts/discover-deps.py once against an existing extern/ to complete them."
+    "Note: Some packages (conditional-dependencies, fmt, libil2cpp, rapidjson-macros, sombrero)",
+    "are hosted exclusively on qpackages.com and cannot be restored from GitHub.",
+    "To restore these, enable the use_qpackages option in the build workflow."
   ],
   "externDir": "extern",
   "dependencies": [
@@ -57,7 +58,7 @@
     {
       "id": "conditional-dependencies",
       "version": "0.3.0",
-      "repo": null,
+      "repo": "QuestPackageManager/conditional-dependencies",
       "ref": "version/v0_3_0",
       "headersOnly": true,
       "cmake": false
@@ -74,8 +75,8 @@
     {
       "id": "cpp-semver",
       "version": "0.1.2",
-      "repo": null,
-      "ref": "version-v0.1.2",
+      "repo": "z4kn4fein/cpp-semver",
+      "ref": "v0.1.0",
       "headersOnly": true
     },
     {
@@ -113,7 +114,7 @@
     {
       "id": "fmt",
       "version": "11.0.2",
-      "repo": null,
+      "repo": "fmtlib/fmt",
       "ref": "version/v11_0_2",
       "headersOnly": true,
       "compileOptions": {
@@ -128,8 +129,8 @@
     {
       "id": "libil2cpp",
       "version": "0.4.0",
-      "repo": null,
-      "ref": null,
+      "repo": "QuestPackageManager/libil2cpp",
+      "ref": "version/v0_4_0",
       "headersOnly": true,
       "compileOptions": {
         "systemIncludes": [
@@ -168,7 +169,7 @@
     {
       "id": "rapidjson-macros",
       "version": "2.1.0",
-      "repo": null,
+      "repo": "QuestPackageManager/rapidjson-macros",
       "ref": "version/v2_1_0",
       "headersOnly": true,
       "cmake": false
@@ -186,7 +187,7 @@
     {
       "id": "sombrero",
       "version": "0.1.43",
-      "repo": null,
+      "repo": "QuestPackageManager/sombrero",
       "ref": "version/v0_1_43",
       "headersOnly": true
     },
