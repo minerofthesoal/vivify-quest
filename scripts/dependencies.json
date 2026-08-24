@@ -1,10 +1,10 @@
 {
   "_comment": [
     "Self-contained dependency manifest for scripts/restore-deps.py.",
-    "Everything here resolves against github.com only; qpackages.com is never contacted.",
-    "Note: Some packages (conditional-dependencies, fmt, libil2cpp, rapidjson-macros, sombrero)",
-    "are hosted exclusively on qpackages.com and cannot be restored from GitHub.",
-    "To restore these, enable the use_qpackages option in the build workflow."
+    "Dependencies with repo/ref are fetched from GitHub first.",
+    "If GitHub fails or no repo/ref is specified, qpackages.com is used as fallback.",
+    "Packages like conditional-dependencies, fmt, libil2cpp, rapidjson-macros, sombrero",
+    "will automatically fall back to qpackages.com when GitHub sources are unavailable."
   ],
   "externDir": "extern",
   "dependencies": [
@@ -58,8 +58,6 @@
     {
       "id": "conditional-dependencies",
       "version": "0.3.0",
-      "repo": "QuestPackageManager/conditional-dependencies",
-      "ref": "version/v0_3_0",
       "headersOnly": true,
       "cmake": false
     },
@@ -114,8 +112,6 @@
     {
       "id": "fmt",
       "version": "11.0.2",
-      "repo": "fmtlib/fmt",
-      "ref": "version/v11_0_2",
       "headersOnly": true,
       "compileOptions": {
         "systemIncludes": [
@@ -129,8 +125,6 @@
     {
       "id": "libil2cpp",
       "version": "0.4.0",
-      "repo": "QuestPackageManager/libil2cpp",
-      "ref": "version/v0_4_0",
       "headersOnly": true,
       "compileOptions": {
         "systemIncludes": [
@@ -169,8 +163,6 @@
     {
       "id": "rapidjson-macros",
       "version": "2.1.0",
-      "repo": "QuestPackageManager/rapidjson-macros",
-      "ref": "version/v2_1_0",
       "headersOnly": true,
       "cmake": false
     },
@@ -187,8 +179,6 @@
     {
       "id": "sombrero",
       "version": "0.1.43",
-      "repo": "QuestPackageManager/sombrero",
-      "ref": "version/v0_1_43",
       "headersOnly": true
     },
     {

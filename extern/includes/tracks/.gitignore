@@ -1,0 +1,24 @@
+build/
+debug_scripts*
+.idea*
+.cache
+
+# Build files
+*.so
+obj/
+libs/
+ndkpath.txt
+*.qmod
+QPM/
+ninja-build/
+build/
+*.cmake
+
+# QPM
+extern/
+*.backup
+
+# Logs
+*.log
+
+profiling/*
