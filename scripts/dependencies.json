@@ -57,7 +57,7 @@
     {
       "id": "conditional-dependencies",
       "version": "0.3.0",
-      "repo": null,
+      "repo": "QuestPackageManager/conditional-dependencies",
       "ref": "version/v0_3_0",
       "headersOnly": true,
       "cmake": false
@@ -74,8 +74,8 @@
     {
       "id": "cpp-semver",
       "version": "0.1.2",
-      "repo": null,
-      "ref": "version-v0.1.2",
+      "repo": "z4kn4fein/cpp-semver",
+      "ref": "v0.1.0",
       "headersOnly": true
     },
     {
