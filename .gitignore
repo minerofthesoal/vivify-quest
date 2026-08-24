@@ -1,41 +1,4 @@
-# Dependencies (restored by scripts/restore-deps.py)
-extern/
-.qpm/
-
-# Build and temp directories
-build/
-temp_qmod/
-dist/
-target/
-
-# Private / user settings
-ndkpath.txt
-qpm.private.json
-CMakeUserPresets.json
-.vscode/
-.idea/
-
-# Compiled outputs
-*.qmod
-*.so
-*.dll
-*.exe
-*.o
-*.obj
-
-# Logs and temp files
-*.log
-*.tmp
-
-# Environment
-.env
-*.env
-
-# Converter test scratch
-tools/bundleconvert/work/
-__pycache__/
-*.pyc
-
-# OS generated files
-.DS_Store
-Thumbs.db
+```
+# CI/CD
+.github/
+```
