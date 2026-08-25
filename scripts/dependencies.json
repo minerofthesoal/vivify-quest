@@ -57,7 +57,9 @@
     },
     {
       "id": "conditional-dependencies",
-      "version": "0.3.0",
+      "version": "0.2.0",
+      "repo": "sc2ad/ConditionalDependencies",
+      "ref": "v0.2.0",
       "headersOnly": true,
       "cmake": false
     },
@@ -112,6 +114,8 @@
     {
       "id": "fmt",
       "version": "11.0.2",
+      "repo": "fmtlib/fmt",
+      "ref": "11.0.2",
       "headersOnly": true,
       "compileOptions": {
         "systemIncludes": [
@@ -128,9 +132,9 @@
       "headersOnly": true,
       "compileOptions": {
         "systemIncludes": [
-          "il2cpp/libil2cpp",
-          "il2cpp/external/baselib/Include",
-          "il2cpp/external/baselib/Platforms/Android/Include"
+          "libil2cpp/libil2cpp",
+          "libil2cpp/external/baselib/Include",
+          "libil2cpp/external/baselib/Platforms/Android/Include"
         ]
       }
     },
@@ -163,6 +167,8 @@
     {
       "id": "rapidjson-macros",
       "version": "2.1.0",
+      "repo": "Metalit/RapidjsonMacros",
+      "ref": "v2.1.0",
       "headersOnly": true,
       "cmake": false
     },
@@ -179,6 +185,8 @@
     {
       "id": "sombrero",
       "version": "0.1.43",
+      "repo": "Fernthedev/Sombrero-quest",
+      "ref": "v0.1.43",
       "headersOnly": true
     },
     {
