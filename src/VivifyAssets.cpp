@@ -636,7 +636,7 @@ namespace {
 enum class ShaderVerdict { Runnable, NoProgram, DeviceRejected, Dead };
 
 ShaderVerdict ClassifyBundleShader(UnityEngine::Shader* shader) {
-  if (!IsAlive(shader)) return ShaderVerdict::Dead;
+  if (!IsManagedAlive(shader)) return ShaderVerdict::Dead;
   if (shader->get_isSupported()) return ShaderVerdict::Runnable;
   // subshaderCount counts the subshaders that survived compilation *for this
   // build target*. Zero means the serialised shader has no program for Android,
@@ -1031,8 +1031,7 @@ UnityEngine::Shader* Runtime::FindFallbackShader() {
       std::string lowerName = ToStdString(name);
       std::transform(lowerName.begin(), lowerName.end(), lowerName.begin(),
                      [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-      int const score = scoreShader(lowerName);
-        int score = scoreShader(lowerName);
+      int score = scoreShader(lowerName);
       // A stand-in is only useful if the original material's look can be
       // carried across. One that exposes neither _MainTex nor a colour renders
       // everything flat white, which is what made converted maps come up
