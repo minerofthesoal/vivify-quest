@@ -32,18 +32,21 @@ std::string ResolveBundlePath(std::string const& levelPath) {
 
 // Finds a PC-built Vivify AssetBundle in a song folder, by content.
 //
-// Bundle file names are not standardised. This port's own download path writes
-// "bundleAndroid2021.vivify", but a map authored for PC ships whatever Vivify's
-// Unity exporter produced -- commonly "bundleWindows2019" or
-// "bundleWindows2021" with NO extension at all. The previous ".vivify"-only
-// scan therefore found nothing on exactly the maps the conversion path exists
-// to rescue: they were reported as "does not support your game version", the
-// play button stayed disabled, and no bundle was ever offered for conversion.
+// Upstream Vivify names its bundle from VivifyController.BUNDLE_FILE,
+// $"bundle{BUNDLE_SUFFIX}.vivify" where BUNDLE_SUFFIX is "Windows2021" (or
+// "Windows2019" on 1.29.1), so a PC map normally ships bundleWindows2021.vivify
+// -- extension included. This port's own download path writes
+// bundleAndroid2021.vivify, and ResolveBundlePath already finds either by
+// extension.
 //
-// Every candidate is checked for the UnityFS signature instead, so the name
-// does not matter. Names are used only to rank equally-valid candidates: a
-// "windows" name wins over a generic "bundle" name, which wins over anything
-// else that happens to be a Unity archive.
+// The reason this scan is content-based rather than name-based anyway is that
+// the name is only a convention: re-zipped map downloads, hand-built bundles
+// and the Unity exporter's own output all turn up under other names, and a
+// bundle this function fails to find is a map that can never be converted and
+// so can never be played. Every candidate is checked for the UnityFS signature
+// instead. Names are used only to rank equally-valid candidates: a "windows"
+// name wins over a generic "bundle" name, which wins over anything else that
+// happens to be a Unity archive.
 std::string ResolvePcBundlePath(std::string const& levelPath) {
   std::error_code ec;
   std::string best;
@@ -600,6 +603,49 @@ void Runtime::DownloadBundle(uint32_t checksum, std::string const& levelPath, st
   });
 }
 
+
+// Why a bundle shader cannot draw on this device.
+//
+// The port used to record a single bit per shader -- Shader.isSupported -- which
+// collapses two completely different failures into one indistinguishable
+// "unsupported", and every question about a broken map ("is this a geometry
+// shader problem?") stalls on not being able to tell them apart:
+//
+//   NoProgram       the bundle carries no shader program for this platform at
+//                   all. This is every shader in a converted PC bundle: the
+//                   archive was built by Unity for Windows, so its programs are
+//                   DirectX bytecode. Conversion rewrites the container's target
+//                   platform so the assets, meshes and materials load, but it
+//                   cannot invent GLES/Vulkan programs that were never compiled.
+//                   No device could run these, and no setting changes that.
+//
+//   DeviceRejected  the bundle does carry programs -- so it was built for
+//                   Android -- but this GPU accepts none of the subshaders.
+//                   THIS is the bucket a geometry-shader shader lands in.
+//                   Unity records each subshader's hardware requirements and
+//                   refuses the ones the device cannot meet; a geometry stage is
+//                   unavailable under Vulkan on Adreno (Qualcomm has never
+//                   exposed VkPhysicalDeviceFeatures.geometryShader), though it
+//                   is available under OpenGL ES 3.2 via GL_EXT_geometry_shader.
+//
+// Unity picks the highest-LOD subshader whose requirements the device meets, so
+// a shader that ships a geometry-shader subshader *and* a plain one is already
+// handled automatically and lands in Runnable. Only a shader whose every
+// subshader needs a stage this device lacks reaches DeviceRejected.
+namespace {
+enum class ShaderVerdict { Runnable, NoProgram, DeviceRejected, Dead };
+
+ShaderVerdict ClassifyBundleShader(UnityEngine::Shader* shader) {
+  if (!IsAlive(shader)) return ShaderVerdict::Dead;
+  if (shader->get_isSupported()) return ShaderVerdict::Runnable;
+  // subshaderCount counts the subshaders that survived compilation *for this
+  // build target*. Zero means the serialised shader has no program for Android,
+  // which is the converted-PC-bundle case; non-zero means programs exist and the
+  // device turned every one of them down.
+  return shader->get_subshaderCount() > 0 ? ShaderVerdict::DeviceRejected : ShaderVerdict::NoProgram;
+}
+}  // namespace
+
 void Runtime::CacheBundleAssets() {
   if (_mainBundle == nullptr || !UnityEngine::Object::op_Implicit_bool(_mainBundle)) return;
   auto assetNames = _mainBundle->GetAllAssetNames();
@@ -607,6 +653,11 @@ void Runtime::CacheBundleAssets() {
   _assets.clear();
   _assetsByName.clear();
   _supportedShadersByName.clear();
+  int shadersSeen = 0;
+  int shadersRunnable = 0;
+  int shadersNoProgram = 0;
+  int shadersDeviceRejected = 0;
+  std::vector<std::string> deviceRejectedNames;
   for (auto assetName : assetNames) {
     if (!assetName) continue;
     std::string originalAssetPath = il2cpp_utils::detail::to_string(assetName);
@@ -640,8 +691,31 @@ void Runtime::CacheBundleAssets() {
         _assetsByName[nameKey] = asset;
       }
       if (auto* shader = il2cpp_utils::try_cast<UnityEngine::Shader>(asset).value_or(nullptr);
-          IsAlive(shader) && shader->get_isSupported() && !nameKey.empty()) {
-        _supportedShadersByName[nameKey] = shader;
+          IsAlive(shader)) {
+        shadersSeen++;
+        switch (ClassifyBundleShader(shader)) {
+          case ShaderVerdict::Runnable:
+            shadersRunnable++;
+            if (!nameKey.empty()) _supportedShadersByName[nameKey] = shader;
+            break;
+          case ShaderVerdict::NoProgram:
+            shadersNoProgram++;
+            break;
+          case ShaderVerdict::DeviceRejected:
+            shadersDeviceRejected++;
+            // Named individually: this is the bucket that a map author can act
+            // on, by shipping a subshader without the stage this device lacks.
+            if (deviceRejectedNames.size() < 12) {
+              deviceRejectedNames.push_back(fmt::format("'{}' (subshaders={} passes={} maxLOD={})",
+                                                        ShaderNameForLog(shader),
+                                                        shader->get_subshaderCount(),
+                                                        shader->get_passCount(),
+                                                        shader->get_maximumLOD()));
+            }
+            break;
+          case ShaderVerdict::Dead:
+            break;
+        }
       }
     }
     if (GetVivifyDebugLogging()) {
@@ -650,9 +724,55 @@ void Runtime::CacheBundleAssets() {
         LogMaterialShader("bundle-load", originalAssetPath, material);
       } else if (auto* shader = il2cpp_utils::try_cast<UnityEngine::Shader>(asset).value_or(nullptr);
                  IsAlive(shader)) {
-        PaperLogger.info("Vivify shader asset: path='{}' shader='{}' supported={}",
-                         originalAssetPath, ShaderNameForLog(shader), BoolText(shader->get_isSupported()));
+        PaperLogger.info("Vivify shader asset: path='{}' shader='{}' supported={} subshaders={}",
+                         originalAssetPath, ShaderNameForLog(shader), BoolText(shader->get_isSupported()),
+                         shader->get_subshaderCount());
       }
+    }
+  }
+
+  LogBundleShaderAudit(shadersSeen, shadersRunnable, shadersNoProgram, shadersDeviceRejected,
+                       deviceRejectedNames);
+}
+
+// One unconditional verdict per bundle, so a report of "the map is invisible" or
+// "geometry shaders don't work" can be answered from the log without a repro.
+void Runtime::LogBundleShaderAudit(int seen, int runnable, int noProgram, int deviceRejected,
+                                   std::vector<std::string> const& deviceRejectedNames) const {
+  if (seen == 0) return;
+
+  bool const converted = !_preloadedBundlePath.empty() &&
+                         _preloadedBundlePath.rfind(ConvertedBundleCacheDir(), 0) == 0;
+  PaperLogger.info(
+      "Vivify shaders: bundle='{}' converted={} total={} runnable={} noAndroidProgram={} deviceRejected={}",
+      _preloadedBundlePath, BoolText(converted), seen, runnable, noProgram, deviceRejected);
+
+  if (noProgram > 0) {
+    PaperLogger.warn(
+        "Vivify: {} of {} shaders in this bundle carry no Android program, so they cannot run on any Quest. "
+        "{} Materials using them fall back to stand-in shading, which keeps the models visible but loses their "
+        "real shading -- raymarching, post-processing and geometry-stage effects included.",
+        noProgram, seen,
+        converted ? "This bundle was converted from a PC build: its shader programs are DirectX bytecode, which "
+                    "conversion cannot translate. Only a bundle built for Android carries runnable programs."
+                  : "The bundle was not built for Android.");
+  }
+
+  if (deviceRejected > 0) {
+    // Programs exist, so the bundle really was built for Android and the GPU is
+    // the one refusing. A geometry or tessellation stage is the usual reason.
+    PaperLogger.warn(
+        "Vivify: {} of {} shaders were built for Android but this GPU accepts none of their subshaders. "
+        "A shader stage the device lacks is the usual cause -- under Vulkan on Adreno there is no geometry or "
+        "tessellation stage at all. A shader that also ships a subshader without that stage is selected "
+        "automatically and does not appear here.",
+        deviceRejected, seen);
+    for (auto const& name : deviceRejectedNames) {
+      PaperLogger.warn("Vivify shader rejected by device: {}", name);
+    }
+    if (deviceRejected > static_cast<int>(deviceRejectedNames.size())) {
+      PaperLogger.warn("Vivify: ... and {} more",
+                       deviceRejected - static_cast<int>(deviceRejectedNames.size()));
     }
   }
 }

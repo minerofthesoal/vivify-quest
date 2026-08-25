@@ -328,6 +328,60 @@ consume. Converted bundles therefore fall back to Vivify's replacement-shader
 path rather than the mapper's intended shading. It is a rescue path for maps
 that have no Android bundle yet — not a substitute for one.
 
+## Geometry shaders
+
+Short answer: a geometry shader can run on Quest only if the map ships a bundle
+built for **Android**, and only if the game's graphics API exposes a geometry
+stage. Neither is something this mod can arrange.
+
+Two separate walls stand between a Vivify map and a working geometry shader, and
+they need completely different fixes:
+
+1. **No Android program exists.** Upstream Vivify only ever builds one bundle
+   per map: `VivifyController.BUNDLE_FILE` is `$"bundle{BUNDLE_SUFFIX}.vivify"`
+   and `BUNDLE_SUFFIX` is `Windows2021` (or `Windows2019` on 1.29.1) — there is
+   no Android suffix in the upstream source at all. So a PC-authored map's
+   shader programs are DirectX bytecode. The on-device converter rewrites the
+   archive's target platform, which is what makes the meshes, prefabs, materials
+   and property values load; it cannot invent GLES or Vulkan programs that were
+   never compiled. Every shader in a converted bundle is dead on arrival, and a
+   geometry shader is no more or less dead than a plain one. The only real fix
+   is an Android bundle — built by the mapper, or fetched from the community
+   bundle repo when someone has published one for that map's checksum.
+
+2. **The device has no geometry stage.** Even with real Android programs, a
+   geometry stage is only available under OpenGL ES 3.2, via
+   `GL_EXT_geometry_shader`. Adreno's Vulkan driver reports
+   `VkPhysicalDeviceFeatures.geometryShader` as false and always has — Qualcomm
+   has never shipped geometry or tessellation stages on Vulkan. Which API Beat
+   Saber uses is baked into its APK at build time, so no mod can switch it.
+   Unity's `SystemInfo` in this build exposes no `supportsGeometryShaders` to
+   ask directly, so the mod logs `Vivify graphics: api=… geometryShaderStagePossible=…`
+   once per session instead.
+
+Unity picks the highest-LOD subshader whose hardware requirements the device
+meets. A shader that ships a geometry-shader subshader **and** a plain fallback
+subshader therefore already works — Unity selects the fallback silently. Only a
+shader whose every subshader needs a stage the device lacks actually fails.
+
+### Reading the audit
+
+Because those two walls look identical from the outside ("the map is invisible"),
+every bundle load now logs which one it hit:
+
+```
+Vivify shaders: bundle='…' converted=true total=24 runnable=0 noAndroidProgram=24 deviceRejected=0
+```
+
+- `noAndroidProgram` — the shader has zero subshaders for this platform. Wall 1.
+  Expect this to equal `total` for any converted bundle.
+- `deviceRejected` — subshaders exist, so the bundle *was* built for Android, and
+  this GPU turned every one of them down. Wall 2, and the bucket a geometry
+  shader lands in. Each such shader is logged by name with its subshader count,
+  pass count and maximum LOD, so a mapper can see exactly what to add a fallback
+  subshader for.
+- `runnable` — shaders that will actually draw.
+
 ## What's unverified
 
 None of this has been compiled or run on-device — see "Building" below for why.

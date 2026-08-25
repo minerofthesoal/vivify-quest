@@ -112,6 +112,11 @@ private:
   void PreloadBundle(std::string const& bundlePath);
   void LoadMainBundle();
   void CacheBundleAssets();
+  // Reports, per bundle, how many shaders can actually draw here and why the
+  // rest cannot -- separating "no Android program was ever compiled" from
+  // "this GPU refuses every subshader", which need completely different fixes.
+  void LogBundleShaderAudit(int seen, int runnable, int noProgram, int deviceRejected,
+                            std::vector<std::string> const& deviceRejectedNames) const;
   UnityEngine::Object* GetAssetObject(std::string_view assetName) const;
   template <typename T>
   T* GetAssetAs(std::string_view assetName) const {
