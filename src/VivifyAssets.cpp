@@ -5,6 +5,7 @@
 #include "UnityEngine/Texture2D.hpp"
 #include "UnityEngine/TextureFormat.hpp"
 #include <atomic>
+#include <chrono>
 #include <cstdio>
 #include <cstring>
 #include <thread>
@@ -860,9 +861,28 @@ void Runtime::LoadMainBundle() {
     return;
   }
   _preloadedBundlePath = bundlePath;
-  CacheBundleAssets();
-  DecodeUnsupportedBundleTextures();
-  RepairLoadedMaterialShaders();
+
+  // Time each phase unconditionally. All of this runs on the main thread while
+  // the level is loading, so when someone reports a freeze these three numbers
+  // say which phase to look at without needing a repro.
+  auto phase = [](char const* name, auto&& work) {
+    auto const start = std::chrono::steady_clock::now();
+    work();
+    double const ms =
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+    if (ms > 250.0) {
+      PaperLogger.warn("Vivify level load: {} took {:.0f}ms", name, ms);
+    } else {
+      PaperLogger.info("Vivify level load: {} took {:.0f}ms", name, ms);
+    }
+    return ms;
+  };
+
+  double total = 0.0;
+  total += phase("cache bundle assets", [this]() { CacheBundleAssets(); });
+  total += phase("decode textures", [this]() { DecodeUnsupportedBundleTextures(); });
+  total += phase("repair shaders", [this]() { RepairLoadedMaterialShaders(); });
+  PaperLogger.info("Vivify level load: {:.0f}ms total", total);
 }
 
 UnityEngine::Object* Runtime::GetAssetObject(std::string_view assetName) const {
@@ -995,6 +1015,13 @@ UnityEngine::Shader* Runtime::FindFallbackShader() {
   if (IsAlive(_fallbackShader) && _fallbackShader->get_isSupported()) {
     return _fallbackShader;
   }
+  // A failed search has to be remembered too. This walks every shader object
+  // loaded in the process -- thousands, in Beat Saber -- calling get_isSupported,
+  // get_name and FindPropertyIndex on each. RepairMaterialShader calls it for
+  // every material it cannot fix, and prefab instances bring fresh materials, so
+  // without a negative cache one unfixable bundle turns into a full shader-database
+  // scan per material per spawn. That is not a slow frame, it is a stopped game.
+  if (_fallbackShaderSearchFailed) return nullptr;
   _fallbackShader = nullptr;
 
   // Names worth trying directly, cheapest first. Beat Saber's own shaders come
@@ -1069,6 +1096,12 @@ UnityEngine::Shader* Runtime::FindFallbackShader() {
   } else {
     PaperLogger.error("Vivify fallback shader: no usable shader found; assets with unsupported "
                       "shaders will not render");
+  }
+  if (!IsAlive(_fallbackShader)) {
+    _fallbackShaderSearchFailed = true;
+    PaperLogger.warn(
+        "Vivify found no usable stand-in shader among the shaders loaded in this process. "
+        "Materials with unsupported shaders will be left alone rather than rescanning every time.");
   }
   return _fallbackShader;
 }
@@ -1306,6 +1339,20 @@ UnityEngine::Texture* Runtime::ResolveUsableTexture(UnityEngine::Texture* textur
 // so a material that keeps its own working shader still gets usable textures.
 void Runtime::DecodeUnsupportedBundleTextures() {
   int swapped = 0;
+  int skipped = 0;
+
+  // Block-compressed decoding is real CPU work on the main thread: a 2048x2048
+  // BC7 texture is four million pixels, and a bundle can hold dozens. Left
+  // unbounded it stalls the game for as long as it takes, which is
+  // indistinguishable from a freeze. Decode what fits in the budget, skip the
+  // rest, and say how many were skipped -- a few untextured materials beat a
+  // hung game.
+  constexpr double kDecodeBudgetMs = 2000.0;
+  auto const start = std::chrono::steady_clock::now();
+  auto elapsedMs = [&start]() {
+    return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+  };
+
   for (auto const& [path, asset] : _assets) {
     auto* material = il2cpp_utils::try_cast<UnityEngine::Material>(asset).value_or(nullptr);
     if (!IsAlive(material)) continue;
@@ -1315,6 +1362,12 @@ void Runtime::DecodeUnsupportedBundleTextures() {
       if (!name) continue;
       auto* current = material->GetTexture(name).unsafePtr();
       if (!IsAlive(current)) continue;
+      // An already-decoded texture is a cache hit and costs nothing, so the
+      // budget only gates work that has not been done yet.
+      if (elapsedMs() > kDecodeBudgetMs && !_decodedTextures.contains(current)) {
+        skipped++;
+        continue;
+      }
       auto* usable = ResolveUsableTexture(current);
       if (IsAlive(usable) && usable != current) {
         material->SetTexture(name, usable);
@@ -1322,9 +1375,16 @@ void Runtime::DecodeUnsupportedBundleTextures() {
       }
     }
   }
-  if (swapped > 0) {
-    PaperLogger.info("Vivify texture decode: replaced {} unsupported texture reference(s) across bundle materials",
-                     swapped);
+  if (swapped > 0 || skipped > 0) {
+    PaperLogger.info(
+        "Vivify texture decode: replaced {} unsupported texture reference(s) in {:.0f}ms, skipped {} over budget",
+        swapped, elapsedMs(), skipped);
+  }
+  if (skipped > 0) {
+    PaperLogger.warn(
+        "Vivify stopped decoding textures after {:.0f}ms and left {} reference(s) on their original, "
+        "unsampleable format. Those materials render untextured rather than stalling the game.",
+        kDecodeBudgetMs, skipped);
   }
 }
 
@@ -1390,7 +1450,7 @@ bool IsBulkPcBundleConversionRunning() {
   return gBulkConversionRunning.load();
 }
 
-void StartBulkPcBundleConversion(std::function<void(BulkConversionProgress const&)> onProgress) {
+void StartBulkPcBundleConversion(std::function<void(BulkConversionProgress const&)> onProgress, bool force) {
   bool expected = false;
   if (!gBulkConversionRunning.compare_exchange_strong(expected, true)) {
     return;
@@ -1401,7 +1461,7 @@ void StartBulkPcBundleConversion(std::function<void(BulkConversionProgress const
   // worker only needs the snapshot.
   auto levels = CollectCustomLevelDirectories();
 
-  std::thread([onProgress = std::move(onProgress), levels = std::move(levels)]() {
+  std::thread([onProgress = std::move(onProgress), levels = std::move(levels), force]() {
     auto report = [&onProgress](BulkConversionProgress progress) {
       if (!onProgress) return;
       BSML::MainThreadScheduler::Schedule([onProgress, progress]() { onProgress(progress); });
@@ -1410,7 +1470,8 @@ void StartBulkPcBundleConversion(std::function<void(BulkConversionProgress const
     BulkConversionProgress progress;
     try {
       progress.levelsTotal = static_cast<int>(levels.size());
-      progress.status = "Scanning " + std::to_string(progress.levelsTotal) + " level(s)...";
+      progress.status = std::string(force ? "Reconverting " : "Scanning ") +
+                        std::to_string(progress.levelsTotal) + " level(s)...";
       report(progress);
 
       for (auto const& level : levels) {
@@ -1425,9 +1486,25 @@ void StartBulkPcBundleConversion(std::function<void(BulkConversionProgress const
 
         std::string const dest = ConvertedBundlePath(source);
         if (std::filesystem::exists(dest)) {
-          progress.alreadyDone++;
-          PaperLogger.info("Vivify bulk convert: '{}' already cached at '{}'", source, dest);
-          continue;
+          if (!force) {
+            progress.alreadyDone++;
+            PaperLogger.info("Vivify bulk convert: '{}' already cached at '{}'", source, dest);
+            continue;
+          }
+          // Forced: drop the cached file so the conversion actually re-runs.
+          // ConvertToAndroid writes through a .part file and renames, so a
+          // failure after this point leaves no cached bundle rather than a
+          // truncated one -- the level falls back to being unconverted, which
+          // is the state it would have been in anyway.
+          std::error_code ec;
+          std::filesystem::remove(dest, ec);
+          if (ec) {
+            progress.failed++;
+            PaperLogger.warn("Vivify bulk convert: could not remove cached '{}' to reconvert: {}",
+                             dest, ec.message());
+            continue;
+          }
+          PaperLogger.info("Vivify bulk convert: discarded cached '{}' to reconvert", dest);
         }
 
         progress.status = level.filename().string();

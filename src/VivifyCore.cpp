@@ -1,4 +1,6 @@
 #include "VivifyRuntimeInternal.hpp"
+#include <chrono>
+#include <algorithm>
 #include "VivifyComponents.hpp"
 #include "UnityEngine/ParticleSystem.hpp"
 #include "GlobalNamespace/PlayerDataModel.hpp"
@@ -110,6 +112,17 @@ void Runtime::OnCustomEventStatic(GlobalNamespace::BeatmapCallbacksController* c
 }
 
 void Runtime::Update() {
+  // Once the watchdog has stood down, the only per-frame work left is the one
+  // check that can bring us back: a new beatmap clears the flag in ResetRuntime.
+  if (_selfDisabledThisLevel) return;
+
+  // Budget for one frame of Vivify work. Beat Saber renders at 72-90Hz, so a
+  // frame is 11-14ms in total; anything from this mod taking longer than
+  // kSlowFrameMs is already visible as a stutter, and a sustained run of them
+  // is what a player experiences as a freeze.
+  constexpr double kSlowFrameMs = 50.0;
+  constexpr int kSlowFrameStreakLimit = 30;
+  auto const frameStart = std::chrono::steady_clock::now();
 
   try {
     // Runs in the menu too, so a stalled download is not left pending.
@@ -138,6 +151,26 @@ void Runtime::Update() {
     LogThrottledUpdateError(ex.what());
   } catch (...) {
     LogThrottledUpdateError("non-std exception");
+  }
+
+  double const frameMs =
+      std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - frameStart).count();
+  _worstFrameMs = std::max(_worstFrameMs, frameMs);
+  if (frameMs > kSlowFrameMs) {
+    _slowFrameStreak++;
+    if (_slowFrameStreak == 1) {
+      PaperLogger.warn("Vivify frame took {:.1f}ms, over the {:.0f}ms budget", frameMs, kSlowFrameMs);
+    }
+    if (_slowFrameStreak >= kSlowFrameStreakLimit) {
+      _selfDisabledThisLevel = true;
+      PaperLogger.error(
+          "Vivify has stood down for this level: {} consecutive frames over {:.0f}ms (worst {:.1f}ms). "
+          "The map loses its Vivify visuals, but the game keeps running instead of freezing. "
+          "Please report this log line with the map name.",
+          _slowFrameStreak, kSlowFrameMs, _worstFrameMs);
+    }
+  } else {
+    _slowFrameStreak = 0;
   }
 }
 
@@ -482,6 +515,10 @@ void Runtime::ResetRuntime() {
   _currentGlobalKeywords.clear();
   _repairedMaterials.clear();
   _fallbackShadedMaterials.clear();
+  // A new beatmap gets a fresh chance: the watchdog is per level, not permanent.
+  _selfDisabledThisLevel = false;
+  _slowFrameStreak = 0;
+  _worstFrameMs = 0.0;
   _decodedTextures.clear();
   _assets.clear();
   _assetsByName.clear();

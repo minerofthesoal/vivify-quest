@@ -363,6 +363,60 @@ Three guards now stand between that mistake and a shipped build:
   becomes a `.qmod`. Libraries that arrive transitively (`libtinyxml2.so` comes
   with BSML) are reported as notes rather than failures.
 
+## 0.8.9 — freezes, and a watchdog so they cannot happen again
+
+Every level froze on start and the game had to be force-quit. 0.8.8 was the
+first build that ran on device since 0.5.1, so the cause could be anything in
+that window; rather than guess, this release makes a freeze impossible and makes
+the next report decisive.
+
+**Vivify now stands down instead of hanging the game.** Per-frame work is timed.
+Thirty consecutive frames over 50ms (a frame is 11-14ms at 72-90Hz) and Vivify
+disables itself for the rest of the level, logging the worst frame time. The map
+loses its Vivify visuals, which is bad, but the game keeps running and you do
+not have to restart it. A new beatmap clears the flag.
+
+**Level-load phases are timed unconditionally.** All of this runs on the main
+thread while the level loads:
+
+```
+Vivify level load: cache bundle assets took 120ms
+Vivify level load: decode textures took 3400ms
+Vivify level load: repair shaders took 80ms
+Vivify level load: 3600ms total
+```
+
+Whichever number is large is the cause. Please send these lines.
+
+Two concrete hazards found while looking, both real regardless of whether they
+caused this:
+
+- **`FindFallbackShader` never cached a failed search.** It walks every shader
+  object loaded in the process — thousands, in Beat Saber — calling
+  `isSupported`, `name` and `FindPropertyIndex` on each. `RepairMaterialShader`
+  calls it for every material it cannot fix, and prefab instances bring fresh
+  materials each spawn, so one bundle with no usable stand-in meant a full
+  shader-database scan per material per spawn. That is not a slow frame, it is a
+  stopped game. The failure is now remembered.
+
+- **Texture decoding was unbounded on the main thread.** A 2048x2048 BC7 texture
+  is four million pixels and a bundle can hold dozens. There is now a 2-second
+  budget per level; textures past it keep their original format and render
+  untextured, and the count is logged. Already-decoded textures are cache hits
+  and do not consume budget.
+
+## Force reconvert
+
+The settings menu has a second button, **Force Reconvert All (ignore cache)**.
+
+A converted bundle is cached under a key derived from the *source* bundle's
+identity, so once a map has been converted the cached file is reused forever —
+including a conversion produced by an older or buggier converter. Short of
+deleting the cache directory by hand there was no way to pick up converter
+fixes. The forced pass removes each cached file before reconverting. Conversion
+writes through a `.part` file and renames, so a failure mid-pass leaves no
+cached bundle rather than a truncated one.
+
 ## Converting shaders PC -> Quest
 
 Earlier versions of this README said conversion "cannot translate" DirectX
