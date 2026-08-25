@@ -303,6 +303,17 @@ def extract_headers(dep: dict, includes: pathlib.Path, allow_qpackages: bool = T
 
 
 def download_library(dep: dict, libs: pathlib.Path) -> None:
+    # A headers-only dependency contributes no library, and placing one anyway is
+    # not a harmless extra file: extern.cmake links every .so in extern/libs, so
+    # it becomes a DT_NEEDED entry in libVivify.so and the mod fails to dlopen on
+    # a device that (correctly) does not have it. config-utils is exactly this --
+    # qpm resolves it headersOnly, and the overrideSoName in qpm.shared.json names
+    # the repo's *test* binary, libconfig-utils_test.so.
+    if dep.get("headersOnly"):
+        if dep.get("soLink"):
+            print(f"  skip lib {dep['id']:<26} headersOnly, ignoring soLink")
+        return
+
     # First try local bundled libraries
     if extract_library_from_local(dep, libs):
         return
@@ -353,6 +364,25 @@ def verify_include_paths(manifest: dict, includes: pathlib.Path) -> list:
                 missing.append(
                     f"{dep['id']} submodule '{submodule['path']}' ({submodule['repo']}) -> {candidate} is missing or empty")
     return missing
+
+
+def verify_libraries(manifest: dict, libs: pathlib.Path) -> list:
+    """Check extern/libs against the manifest, in both directions.
+
+    Every .so here is linked into the mod and becomes a DT_NEEDED entry, so a
+    stray one is a load failure on device rather than dead weight -- and a
+    missing one is a link error. Both are worth catching at restore time.
+    """
+    expected = {library_file_name(dep) for dep in manifest["dependencies"]
+                if not dep.get("headersOnly") and dep.get("soLink")}
+    present = {path.name for path in libs.glob("*.so")}
+    problems = []
+    for name in sorted(expected - present):
+        problems.append(f"missing library {name}")
+    for name in sorted(present - expected):
+        problems.append(f"unexpected library {name} in {libs} "
+                        f"(it would become a DT_NEEDED entry no device can satisfy)")
+    return problems
 
 
 def sync_mod_version(manifest_version: str) -> None:
@@ -445,9 +475,12 @@ def main() -> int:
         print(f"  GitHub sources: {github_deps}")
         print(f"  qpackages.com fallback: {len(needs_registry)}")
         print(f"Native libraries: {sum(1 for d in dependencies if d.get('soLink'))}")
-        includes = ROOT / manifest.get("externDir", "extern") / "includes"
+        extern_dir = ROOT / manifest.get("externDir", "extern")
+        includes = extern_dir / "includes"
         if includes.is_dir():
             missing = verify_include_paths(manifest, includes)
+            if (extern_dir / "libs").is_dir():
+                missing += verify_libraries(manifest, extern_dir / "libs")
             for entry in missing:
                 print(f"error: {entry}", file=sys.stderr)
             if missing:
@@ -486,9 +519,9 @@ def main() -> int:
         print(f"\n{len(failures)} dependency/dependencies failed to restore.", file=sys.stderr)
         return 1
 
-    missing = verify_include_paths(manifest, includes)
+    missing = verify_include_paths(manifest, includes) + verify_libraries(manifest, libs)
     if missing:
-        print("\nerror: declared include directories are missing after restore:", file=sys.stderr)
+        print("\nerror: restored dependency tree does not match the manifest:", file=sys.stderr)
         for entry in missing:
             print(f"  - {entry}", file=sys.stderr)
         print("Fix the paths in scripts/dependencies.json to match the restored layout.",
