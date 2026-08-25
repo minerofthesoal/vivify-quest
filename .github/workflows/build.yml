@@ -98,6 +98,18 @@ jobs:
     - name: Build
       run: qpm s build
 
+    # A DT_NEEDED entry the device cannot satisfy makes dlopen fail outright, and
+    # the mod reports only "libVivify.so failed" with no indication which library
+    # was missing. Catch it here instead of on someone's headset.
+    - name: Check the built library's dependencies can be satisfied on device
+      run: |
+        so=$(find build -name 'libVivify.so' -print -quit)
+        if [ -z "$so" ]; then
+          echo "::error::no libVivify.so was produced"
+          exit 1
+        fi
+        python3 scripts/check-so-dependencies.py "$so"
+
     - name: Create QMOD
       run: qpm s qmod
 

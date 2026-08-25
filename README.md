@@ -330,6 +330,39 @@ rather than an impossibility.) Converted bundles therefore fall back to Vivify's
 path rather than the mapper's intended shading. It is a rescue path for maps
 that have no Android bundle yet — not a substitute for one.
 
+## 0.8.8 — the mod would not load at all
+
+`libVivify.so` failed to `dlopen` on device, so nothing in the mod ran. The
+cause was a regression from the move off qpackages.com, in this repo, not in any
+dependency.
+
+`config-utils` is a **headers-only** dependency: qpm resolves it with
+`headersOnly: true` and links no library for it. Its GitHub release does publish
+a `.so` — `libconfig-utils_test.so`, the repo's *test* binary, which is also what
+`overrideSoName` names in `qpm.shared.json`. `scripts/dependencies.json` copied
+that `overrideSoName` across and gave the entry a `soLink`, so
+`restore-deps.py` downloaded it into `extern/libs/`.
+
+`extern.cmake` links **every** `.so` in `extern/libs`, so the mod picked up
+`DT_NEEDED[libconfig-utils_test.so]`. It linked cleanly and built a perfectly
+valid library that no Quest can load, because no Quest has that file. The
+failure surfaces only as "libVivify.so failed", with no indication of which
+library was missing.
+
+Three guards now stand between that mistake and a shipped build:
+
+- `restore-deps.py` refuses to place a library for a dependency marked
+  `headersOnly`, and says so.
+- After a restore it compares `extern/libs` against the manifest in both
+  directions — a missing library is a link error, and a stray one is a load
+  failure, so both fail loudly.
+- `scripts/check-so-dependencies.py` reads the built `libVivify.so`'s actual
+  `DT_NEEDED` list and checks every entry is an Android system library, provided
+  by the modloader, or installed by a real qpm dependency. It runs in the build
+  workflow between compiling and packaging, so a mod that cannot load never
+  becomes a `.qmod`. Libraries that arrive transitively (`libtinyxml2.so` comes
+  with BSML) are reported as notes rather than failures.
+
 ## Converting shaders PC -> Quest
 
 Earlier versions of this README said conversion "cannot translate" DirectX
