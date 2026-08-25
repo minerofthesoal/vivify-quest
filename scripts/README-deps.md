@@ -34,6 +34,26 @@ Two things the script checks or fixes up on every restore:
   the build on `fmt/base.h`. The restore now fails and names the directory
   instead. `--check` applies the same test whenever `extern/` is already
   populated.
+- **Git submodules are fetched separately.** A GitHub source tarball contains no
+  submodule content — the submodule path is simply absent from the archive. qpm
+  never hit this, because a qpackages package is zipped from a full checkout.
+  Two headers this project includes unconditionally had nothing behind them:
+  `beatsaber-hook/shared/config/rapidjson-utils.hpp` includes
+  `../rapidjson/include/rapidjson/rapidjson.h` (Tencent/rapidjson), and
+  `paper2_scotland2/shared/string_convert.hpp` includes `<utf8/cpp11.h>`
+  (nemtrif/utfcpp). A dependency can now declare them:
+
+  ```json
+  "submodules": [
+    { "path": "shared/rapidjson", "repo": "Tencent/rapidjson", "ref": "5ec44fb…" }
+  ]
+  ```
+
+  The `ref` is the exact commit the dependency pins — read off its `.gitmodules`
+  and the gitlink in its tree (`git ls-tree HEAD shared/`) — so the restored
+  layout matches `git clone --recursive`. A submodule directory that is missing
+  **or empty** fails the restore by name, since an empty one fails the same
+  silent way a wrong include path does.
 - **`MOD_VERSION` in `qpm_defines.cmake` is synced from `qpm.json`.** qpm
   rewrites that file on restore; this script replaces qpm, so without the sync
   the compiled binary keeps reporting whatever version was current the last
