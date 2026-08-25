@@ -151,7 +151,7 @@ and repacks it uncompressed. Unity then accepts and enumerates the bundle.
 - Every path that leaves the play button disabled now names its own reason
   ("Convert failed: unsupported bundle compression", "Asset download timed
   out", "PC bundle found; enable Convert PC Bundles On Device in settings",
-  …), and level selection always logs one line to `Vivify.log` recording the
+  …), and level selection always logs one line to `VivifySession.txt` recording the
   Android bundle, PC bundle, checksum, cache path and decision taken.
 
 **Convert All PC Bundles Now.** Per-level conversion runs on level *selection*,
@@ -416,6 +416,30 @@ deleting the cache directory by hand there was no way to pick up converter
 fixes. The forced pass removes each cached file before reconverting. Conversion
 writes through a `.part` file and renames, so a failure mid-pass leaves no
 cached bundle rather than a truncated one.
+
+## 0.9.1 — both diagnostic files are .txt, in one folder
+
+The full session log was at `Logs/Vivify.log`. A `.log` file has no default
+handler on Android or Windows, so tapping it does nothing and it looks like no
+log exists at all -- and it lived in a different directory from the per-level
+report, so there were two places to look. Both files are now plain `.txt` in the
+mod's own folder, and both paths are shown in the settings menu:
+
+```
+/sdcard/ModData/com.beatgames.beatsaber/Mods/Vivify/VivifyReport.txt    per-level report
+/sdcard/ModData/com.beatgames.beatsaber/Mods/Vivify/VivifySession.txt   full session log
+```
+
+Two things about the session log were worth fixing while renaming it:
+
+- **It flushed on every line.** That is an sdcard write per log line, on
+  whichever thread logged -- including the main thread during gameplay, where
+  Vivify can be noisy. Warnings and errors still flush immediately, since those
+  are the lines that matter if the game stops before the buffer reaches disk;
+  ordinary lines are now flushed at most a few times a second.
+- **It had no size limit.** Capped at 8MB per session, after which lines go to
+  logcat only and the file says so. It is truncated at launch, so this only has
+  to bound a single play session.
 
 ## 0.9.0 — a report file you can actually find
 
