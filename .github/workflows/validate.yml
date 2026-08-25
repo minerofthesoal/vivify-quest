@@ -73,3 +73,19 @@ jobs:
 
     - name: Decoder tests
       run: /tmp/texdec
+
+  host-syntax-check:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Install clang and libc++ headers
+      run: sudo apt-get update -qq && sudo apt-get install -y -qq clang-18 libc++-18-dev libc++abi-18-dev
+
+    # Catches type, name-lookup and template errors in this project's own code
+    # without needing the Android NDK, so a mistake like calling a Runtime member
+    # from a free function is caught here rather than several CI rounds later.
+    # See the header comment in the script for what it deliberately does not cover.
+    - name: Syntax-check every source file
+      run: CLANG=clang++-18 ./scripts/host-syntax-check.sh
