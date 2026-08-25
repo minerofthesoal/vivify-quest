@@ -9,6 +9,10 @@ on:
     branches: [ main, master ]
   workflow_dispatch:
     inputs:
+      version:
+        description: 'Override version number (optional, defaults to mod.json version)'
+        required: false
+        default: ''
       dependency_source:
         description: 'Where to resolve dependencies from'
         type: choice
@@ -32,12 +36,13 @@ jobs:
       with:
         submodules: true
 
-    # Two ways to get dependencies:
-    #   github     - scripts/restore-deps.py, resolving from github.com only
-    #   qpackages  - the classic `qpm restore` against qpackages.com
-    # "auto" (the default, and what push/PR runs get) prefers the github
-    # manifest and falls back to qpackages.com while that manifest is still
-    # missing repositories -- see scripts/README-deps.md.
+    # Three ways to get dependencies:
+    #   auto       scripts/restore-deps.py -- GitHub where the manifest has a
+    #              repo, qpackages.com for the rest (default; push/PR runs)
+    #   github     scripts/restore-deps.py --no-qpackages -- GitHub only, and
+    #              fails rather than touching the registry
+    #   qpackages  `qpm restore` only
+    # See scripts/README-deps.md.
     - name: Choose dependency source
       id: deps
       run: |
@@ -46,22 +51,20 @@ jobs:
         # exit-status trap, since Actions runs this step under `bash -e`.
         if [ -z "$requested" ]; then requested=auto; fi
 
-        if [ "$requested" = "qpackages" ]; then
-          source=qpackages
-          reason="requested explicitly"
-        elif [ "$requested" = "github" ]; then
-          source=github
-          reason="requested explicitly"
-          # Asking for github explicitly must fail loudly on an incomplete
-          # manifest rather than quietly reaching for qpackages.com.
-          python3 scripts/restore-deps.py --check || exit 1
-        elif python3 scripts/restore-deps.py --check >/dev/null 2>&1; then
-          source=github
-          reason="manifest is complete"
-        else
-          source=qpackages
-          reason="scripts/dependencies.json is incomplete; run scripts/discover-deps.py to finish the migration"
-        fi
+        case "$requested" in
+          qpackages)
+            source=qpackages
+            reason="requested explicitly" ;;
+          github)
+            source=github
+            reason="requested explicitly"
+            # Must fail loudly on a manifest that still needs the registry.
+            python3 scripts/restore-deps.py --check --no-qpackages || exit 1 ;;
+          *)
+            source=auto
+            reason="GitHub where available, qpackages.com for the remainder"
+            python3 scripts/restore-deps.py --check || exit 1 ;;
+        esac
 
         echo "source=$source" >> "$GITHUB_OUTPUT"
         echo "use_qpm=$([ "$source" = qpackages ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
@@ -79,8 +82,12 @@ jobs:
         cache: true
         resolve_ndk: true
 
-    - name: Restore dependencies (github.com only)
+    - name: Restore dependencies (GitHub only)
       if: steps.deps.outputs.source == 'github'
+      run: python3 scripts/restore-deps.py --no-qpackages
+
+    - name: Restore dependencies (GitHub, qpackages.com for the remainder)
+      if: steps.deps.outputs.source == 'auto'
       run: python3 scripts/restore-deps.py
 
     - name: Build
@@ -92,7 +99,11 @@ jobs:
     - name: Read mod version
       id: mod_version
       run: |
-        VERSION=$(python3 -c "import json; print(json.load(open('mod.json'))['version'])")
+        if [ -n "${{ github.event.inputs.version }}" ]; then
+          VERSION="${{ github.event.inputs.version }}"
+        else
+          VERSION=$(python3 -c "import json; print(json.load(open('mod.json'))['version'])")
+        fi
         echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
     - name: Rename QMOD artifact

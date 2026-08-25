@@ -1,5 +1,6 @@
-# Dependencies (restored by scripts/restore-deps.py)
-extern/
+# Dependencies
+# extern/includes/ is deliberately vendored (see scripts/README-deps.md), so it
+# is tracked rather than ignored. Only the restore scratch is excluded.
 .qpm/
 
 # Build and temp directories
@@ -18,6 +19,8 @@ CMakeUserPresets.json
 # Compiled outputs
 *.qmod
 *.so
+# ...but the vendored native libraries are tracked on purpose.
+!extern/libs/*.so
 *.dll
 *.exe
 *.o
@@ -29,13 +32,19 @@ CMakeUserPresets.json
 
 # Environment
 .env
+.env.local
 *.env
+*.env.*
 
 # Converter test scratch
 tools/bundleconvert/work/
 __pycache__/
 *.pyc
 
-# OS generated files
+# Coverage and testing
+coverage/
+htmlcov/
+
+# System files
 .DS_Store
 Thumbs.db

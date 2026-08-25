@@ -1,9 +1,10 @@
 {
   "_comment": [
     "Self-contained dependency manifest for scripts/restore-deps.py.",
-    "Everything here resolves against github.com only; qpackages.com is never contacted.",
-    "Entries with \"repo\": null still need their source repository filled in --",
-    "run scripts/discover-deps.py once against an existing extern/ to complete them."
+    "Dependencies with repo/ref are fetched from GitHub first.",
+    "If GitHub fails or no repo/ref is specified, qpackages.com is used as fallback.",
+    "Packages like conditional-dependencies, fmt, libil2cpp, rapidjson-macros, sombrero",
+    "will automatically fall back to qpackages.com when GitHub sources are unavailable."
   ],
   "externDir": "extern",
   "dependencies": [
@@ -60,7 +61,8 @@
       "repo": null,
       "ref": "version/v0_3_0",
       "headersOnly": true,
-      "cmake": false
+      "cmake": false,
+      "_note": "upstream project was NOT the qpm package: it has no 'version/v0_3_0' ref. Needs the qpm-packaged fork; run scripts/discover-deps.py."
     },
     {
       "id": "config-utils",
@@ -76,7 +78,8 @@
       "version": "0.1.2",
       "repo": null,
       "ref": "version-v0.1.2",
-      "headersOnly": true
+      "headersOnly": true,
+      "_note": "upstream project was NOT the qpm package: it has no 'version-v0.1.2' ref. Needs the qpm-packaged fork; run scripts/discover-deps.py."
     },
     {
       "id": "custom-json-data",
@@ -123,19 +126,18 @@
         "cppFlags": [
           "-DFMT_HEADER_ONLY"
         ]
-      }
+      },
+      "_note": "upstream project was NOT the qpm package: it has no 'version/v11_0_2' ref. Needs the qpm-packaged fork; run scripts/discover-deps.py."
     },
     {
       "id": "libil2cpp",
       "version": "0.4.0",
-      "repo": null,
-      "ref": null,
       "headersOnly": true,
       "compileOptions": {
         "systemIncludes": [
-          "il2cpp/libil2cpp",
-          "il2cpp/external/baselib/Include",
-          "il2cpp/external/baselib/Platforms/Android/Include"
+          "libil2cpp/libil2cpp",
+          "libil2cpp/external/baselib/Include",
+          "libil2cpp/external/baselib/Platforms/Android/Include"
         ]
       }
     },
@@ -168,8 +170,8 @@
     {
       "id": "rapidjson-macros",
       "version": "2.1.0",
-      "repo": null,
-      "ref": "version/v2_1_0",
+      "repo": "Metalit/RapidjsonMacros",
+      "ref": "v2.1.0",
       "headersOnly": true,
       "cmake": false
     },
@@ -186,8 +188,8 @@
     {
       "id": "sombrero",
       "version": "0.1.43",
-      "repo": null,
-      "ref": "version/v0_1_43",
+      "repo": "Fernthedev/Sombrero-quest",
+      "ref": "v0.1.43",
       "headersOnly": true
     },
     {

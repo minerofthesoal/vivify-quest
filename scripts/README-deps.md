@@ -31,16 +31,18 @@ The build workflow takes a `dependency_source` input when run manually
 
 | Value | Behaviour |
 | --- | --- |
-| `auto` (default) | Uses the github manifest when it is complete, otherwise falls back to `qpm restore`. This is what push and pull-request runs get. |
-| `github` | `scripts/restore-deps.py` only. Fails the build if the manifest is incomplete rather than quietly reaching for qpackages.com. |
-| `qpackages` | The classic `qpm restore` against qpackages.com only. |
+| `auto` (default) | `restore-deps.py` — GitHub for every dependency the manifest can source that way, qpackages.com for the remainder. What push and pull-request runs get. |
+| `github` | `restore-deps.py --no-qpackages` — GitHub only. Fails the build rather than touching the registry, so it only succeeds once the manifest is complete. |
+| `qpackages` | `qpm restore` only. Nothing is fetched from GitHub. |
 
-The chosen source and the reason for it are printed to the log and to the run
-summary, so it is always visible which one a given build used.
+The chosen source and the reason for it go to the log and the run summary, so
+it is always visible which one a build used.
 
-While the manifest is still missing repositories, `auto` resolves to
-`qpackages` — so CI keeps working today, and switches itself to github-only the
-moment the step below is done and committed.
+`--no-qpackages` works on the command line too, including with `--check`:
+
+```sh
+python3 scripts/restore-deps.py --check --no-qpackages   # is GitHub-only viable yet?
+```
 
 ## Finishing the manifest (one time)
 
