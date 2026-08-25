@@ -185,6 +185,18 @@ repair silently gave up. Vivify now enumerates the shaders the process has
 actually loaded (`Resources.FindObjectsOfTypeAll<Shader>`), scores them, and
 caches the best stand-in; the chosen shader is logged.
 
+**Stand-ins can only carry so much.** A stand-in shader is a trade: "invisible"
+becomes "visible but wrong", and for a converted PC bundle "wrong" is often flat
+white, because the original material's look lives in a shader that cannot run.
+Two things limit the damage. The stand-in is chosen preferring shaders that
+expose `_MainTex` and a colour, so whatever the original material carried is
+transferred. And when neither a colour nor a texture can be recovered, the
+substitution is declined outright — an arbitrary flat white shape over the
+scene is worse than the object not drawing, and for notes and sabers declining
+means the game's own visuals stay. The **Stand-In Shading For Unsupported
+Shaders** setting (on by default) turns the whole mechanism off if you would
+rather have converted maps render nothing than render white.
+
 **Belt and braces.** A replacement prefab now only hides the note, saber or
 debris it stands in for once at least one of its spawned renderers has a
 material whose shader this GPU can run. If a bundle's shading cannot be

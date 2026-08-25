@@ -802,6 +802,18 @@ UnityEngine::Shader* Runtime::FindFallbackShader() {
       std::transform(lowerName.begin(), lowerName.end(), lowerName.begin(),
                      [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
       int const score = scoreShader(lowerName);
+        int score = scoreShader(lowerName);
+      // A stand-in is only useful if the original material's look can be
+      // carried across. One that exposes neither _MainTex nor a colour renders
+      // everything flat white, which is what made converted maps come up
+      // partially or fully white.
+      if (score > 0) {
+        if (candidate->FindPropertyIndex(StringW("_MainTex")) >= 0) score += 50;
+        if (candidate->FindPropertyIndex(StringW("_Color")) >= 0 ||
+            candidate->FindPropertyIndex(StringW("_BaseColor")) >= 0) {
+          score += 50;
+        }
+      }
       if (score <= bestScore) continue;
       bestScore = score;
       _fallbackShader = candidate;
@@ -862,6 +874,26 @@ void Runtime::RepairMaterialShader(UnityEngine::Material* material, std::string_
   if (!IsAlive(replacement)) {
     replacement = FindFallbackShader();
   }
+  // Substituting a stand-in trades "invisible" for "visible but wrong". That is
+  // only a good trade when something of the original look survives: if neither
+  // a colour nor a texture could be recovered, the stand-in paints an arbitrary
+  // flat white shape over the scene, which for a large or full-screen mesh is
+  // considerably worse than the object simply not drawing. Leave the dead
+  // shader in place instead -- for notes and sabers ReplacementCanRender then
+  // keeps the game's own visuals, which look right.
+  bool const canCarryLook = fallbackState.color.has_value() || IsManagedAlive(fallbackState.mainTexture);
+  bool const declineStandIn = IsAlive(replacement) && replacement == _fallbackShader &&
+                              (!canCarryLook || !GetStandInShading());
+  if (declineStandIn) {
+    _shaderRepairFailed++;
+    PaperLogger.warn("Vivify shader stand-in declined: material '{}' (shader '{}') -- {}",
+                     ToStdString(material->get_name()), originalShaderName,
+                     !GetStandInShading() ? "stand-in shading is turned off in settings"
+                                          : "no colour or texture to carry over, so it would render flat white");
+    _repairedMaterials.emplace(material);
+    return;
+  }
+
   if (IsAlive(replacement)) {
     material->set_shader(replacement);
     RestoreMaterialFallbackState(material, fallbackState);

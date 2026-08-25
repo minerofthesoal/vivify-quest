@@ -31,6 +31,7 @@ constexpr std::string_view kDisableCustomNoteVisualsConfigKey = "disableCustomNo
 constexpr std::string_view kDisableVisualsInMultiplayerConfigKey = "disableVisualsInMultiplayer";
 constexpr std::string_view kDisableVRCenterAdjustConfigKey = "disableVRCenterAdjust";
 constexpr std::string_view kConvertPcBundlesOnDeviceConfigKey = "convertPcBundlesOnDevice";
+constexpr std::string_view kStandInShadingConfigKey = "standInShading";
 bool gMultipassRenderingEnabled = true;
 bool gVivifyDebugLogging = false;
 bool gDisableBeat0FilmgrainBlit = false;
@@ -49,6 +50,12 @@ bool gDisableVRCenterAdjust = false;
 // Defaults on: it only ever runs when a map has no Android bundle at all and no
 // downloadable one, i.e. when the alternative is an unplayable map.
 bool gConvertPcBundlesOnDevice = true;
+// When a bundle's shader cannot run on this GPU, Vivify swaps in a generic
+// stand-in so the mesh is at least visible. That trades "invisible" for
+// "visible but wrong", and for a converted PC bundle "wrong" often means flat
+// white. Turning this off leaves such meshes undrawn instead, which also means
+// notes and sabers keep the game's own visuals rather than a white stand-in.
+bool gStandInShading = true;
 
 constexpr std::string_view kVivifyLogDir = "/sdcard/ModData/com.beatgames.beatsaber/Logs";
 constexpr std::string_view kVivifyLogPath = "/sdcard/ModData/com.beatgames.beatsaber/Logs/Vivify.log";
@@ -165,6 +172,11 @@ void RegisterModSettings() {
               SetBoolConfigValue(kConvertPcBundlesOnDeviceConfigKey, value, gConvertPcBundlesOnDevice);
             });
 
+        BSML::Lite::CreateToggle(
+            container->get_transform(), u"Stand-In Shading For Unsupported Shaders",
+            GetStandInShading(),
+            [](bool value) { SetBoolConfigValue(kStandInShadingConfigKey, value, gStandInShading); });
+
         // A map whose only asset bundle is a PC build has its play button
         // disabled, so it can never be selected into -- which also means the
         // per-level conversion that runs on level select can never fire for it.
@@ -247,6 +259,10 @@ bool GetConvertPcBundlesOnDevice() {
   return gConvertPcBundlesOnDevice;
 }
 
+bool GetStandInShading() {
+  return gStandInShading;
+}
+
 void EnsureConfigDefaults() {
   auto& config = getConfig();
   auto& doc = config.config;
@@ -263,6 +279,7 @@ void EnsureConfigDefaults() {
   needsWrite |= EnsureBoolConfigValue(kDisableVisualsInMultiplayerConfigKey, true, gDisableVisualsInMultiplayer);
   needsWrite |= EnsureBoolConfigValue(kDisableVRCenterAdjustConfigKey, false, gDisableVRCenterAdjust);
   needsWrite |= EnsureBoolConfigValue(kConvertPcBundlesOnDeviceConfigKey, true, gConvertPcBundlesOnDevice);
+  needsWrite |= EnsureBoolConfigValue(kStandInShadingConfigKey, true, gStandInShading);
   if (needsWrite) {
     config.Write();
   }

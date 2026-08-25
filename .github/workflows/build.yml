@@ -13,6 +13,11 @@ on:
         description: 'Override version number (optional, defaults to mod.json version)'
         required: false
         default: ''
+      release:
+        description: 'Publish a GitHub release for this build'
+        type: boolean
+        required: false
+        default: false
       dependency_source:
         description: 'Where to resolve dependencies from'
         type: choice
@@ -108,9 +113,13 @@ jobs:
 
     - name: Rename QMOD artifact
       run: |
-        for f in ./*.qmod; do
-          mv "$f" "./Vivify-v${{ steps.mod_version.outputs.version }}.qmod"
-        done
+        shopt -s nullglob
+        built=(./*.qmod)
+        if [ ${#built[@]} -eq 0 ]; then
+          echo "::error::qpm s qmod produced no .qmod file"
+          exit 1
+        fi
+        mv "${built[0]}" "./Vivify-v${{ steps.mod_version.outputs.version }}.qmod"
 
     - name: Upload Artifact
       uses: actions/upload-artifact@v4
@@ -119,10 +128,18 @@ jobs:
         path: ./*.qmod
         if-no-files-found: error
 
+    # Fires on a v* tag push, and on a manual run with `release` ticked.
+    # Without the second case a workflow_dispatch build could only ever produce
+    # an artifact, never a release.
     - name: Publish Release
-      if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+      if: >-
+        (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) ||
+        github.event.inputs.release == 'true'
       uses: softprops/action-gh-release@v2
       with:
+        # A tag push releases under the tag that was pushed; a manual run tags
+        # from the version, creating the tag if it does not exist yet.
+        tag_name: ${{ (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) && github.ref_name || format('v{0}', steps.mod_version.outputs.version) }}
         name: Vivify ${{ steps.mod_version.outputs.version }}
         generate_release_notes: true
         body: |
@@ -130,5 +147,6 @@ jobs:
           rbatteries1-design/Vivify-Quest-Port, and Lars27110/Vivify-Quest —
           see README for what was merged from each).
 
-          Built automatically from tag `${{ github.ref_name }}`.
-        files: ./*.qmod
+          Built from `${{ github.ref_name }}` (dependency source:
+          ${{ steps.deps.outputs.source }}).
+        files: ./Vivify-v${{ steps.mod_version.outputs.version }}.qmod
