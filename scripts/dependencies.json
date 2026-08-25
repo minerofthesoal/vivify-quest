@@ -22,7 +22,15 @@
         "cppFlags": [
           "-Wno-extra-qualification"
         ]
-      }
+      },
+      "submodules": [
+        {
+          "path": "shared/rapidjson",
+          "repo": "Tencent/rapidjson",
+          "ref": "5ec44fb9206695e5293f610b0a46d21851d0c966",
+          "_note": "gitlink pinned by beatsaber-hook version/v6_4_2; shared/config/rapidjson-utils.hpp includes ../rapidjson/include/rapidjson/rapidjson.h"
+        }
+      ]
     },
     {
       "id": "bs-cordl",
@@ -137,8 +145,7 @@
         "systemIncludes": [
           "libil2cpp",
           "external/baselib/Include",
-          "external/baselib/Platforms/Android/Include",
-          "external/baselib/Include/External/utfcpp/source"
+          "external/baselib/Platforms/Android/Include"
         ]
       }
     },
@@ -161,8 +168,20 @@
       "soLink": "https://github.com/Fernthedev/paperlog/releases/download/v4.7.0/libpaper2_scotland2.so",
       "modLink": "https://github.com/Fernthedev/paperlog/releases/download/v4.7.0/paper2_scotland2.qmod",
       "overrideSoName": "libpaper2_scotland2.so",
-      "_utfcpp_note": "paper2 declares systemInclude shared/utfcpp/source, but that is a git submodule the release tarball does not carry, so the directory never exists and CMake silently drops it. Only shared/string_convert.hpp needs it and nothing in this project includes that header. libil2cpp vendors a utfcpp copy (listed on that dependency) so <utf8/...> at least resolves; note its cpp11.h and cpp17.h redefine each other, so string_convert.hpp would still need paper2's own submodule to compile.",
-      "cmake": false
+      "cmake": false,
+      "submodules": [
+        {
+          "path": "shared/utfcpp",
+          "repo": "nemtrif/utfcpp",
+          "ref": "6be08bbea14ffa0a5c594257fb6285a054395cd7",
+          "_note": "gitlink pinned by paperlog version/v4_7_0; shared/string_convert.hpp includes <utf8/cpp11.h>"
+        }
+      ],
+      "compileOptions": {
+        "systemIncludes": [
+          "shared/utfcpp/source"
+        ]
+      }
     },
     {
       "id": "rapidjson-macros",

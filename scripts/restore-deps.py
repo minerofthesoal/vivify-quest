@@ -118,6 +118,13 @@ def extract_headers_from_github(dep: dict, includes: pathlib.Path) -> None:
         shutil.rmtree(destination)
     destination.mkdir(parents=True)
 
+    unpack_github_tarball(blob, destination, dep_id)
+
+    extract_submodules(dep, destination)
+
+
+def unpack_github_tarball(blob: bytes, destination: pathlib.Path, label: str) -> None:
+    """Unpack a GitHub source tarball into destination, stripping its root dir."""
     with tarfile.open(fileobj=io.BytesIO(blob), mode="r:gz") as archive:
         members = archive.getmembers()
         # GitHub wraps the tree in a single <repo>-<ref> directory; strip it so
@@ -132,7 +139,7 @@ def extract_headers_from_github(dep: dict, includes: pathlib.Path) -> None:
             # Refuse anything that would escape the destination directory.
             target = (destination / relative).resolve()
             if not str(target).startswith(str(destination.resolve())):
-                raise RuntimeError(f"{dep_id}: archive entry escapes destination: {member.name}")
+                raise RuntimeError(f"{label}: archive entry escapes destination: {member.name}")
             if member.isdir():
                 target.mkdir(parents=True, exist_ok=True)
             elif member.isreg():
@@ -140,6 +147,38 @@ def extract_headers_from_github(dep: dict, includes: pathlib.Path) -> None:
                 source = archive.extractfile(member)
                 if source is not None:
                     target.write_bytes(source.read())
+
+
+def extract_submodules(dep: dict, destination: pathlib.Path) -> None:
+    """Fetch the git submodules a dependency's headers include from.
+
+    A GitHub source tarball contains no submodule content -- the submodule path
+    is simply absent from the archive. qpm never hit this because a qpackages
+    package is zipped from a full checkout, submodules and all, so two headers
+    this project includes unconditionally had nothing behind them:
+
+        beatsaber-hook/shared/config/rapidjson-utils.hpp
+            #include "../rapidjson/include/rapidjson/rapidjson.h"   (Tencent/rapidjson)
+        paper2_scotland2/shared/string_convert.hpp
+            #include <utf8/cpp11.h>                                 (nemtrif/utfcpp)
+
+    Each entry names the upstream repo and the exact commit the dependency
+    pins -- read off its own .gitmodules and the gitlink in its tree -- so the
+    restored layout matches what a `git clone --recursive` would produce.
+    """
+    for submodule in dep.get("submodules") or []:
+        repo, ref, path = submodule["repo"], submodule["ref"], submodule["path"]
+        url = f"https://github.com/{repo}/archive/{ref}.tar.gz"
+        label = f"{dep['id']}/{path}"
+        target = destination / path
+        # A dependency restored from qpackages.com, or vendored in place, already
+        # carries its submodule content; only the GitHub tarball path leaves the
+        # directory missing or empty.
+        if target.is_dir() and any(target.iterdir()):
+            continue
+        print(f"  submod   {label:<26} {repo}@{ref[:12]} (GitHub)")
+        target.mkdir(parents=True, exist_ok=True)
+        unpack_github_tarball(fetch(url), target, label)
 
 
 def extract_headers_from_qpackages(dep: dict, includes: pathlib.Path) -> None:
@@ -242,6 +281,7 @@ def extract_headers(dep: dict, includes: pathlib.Path, allow_qpackages: bool = T
     """
     # First try local bundled packages
     if extract_headers_from_local(dep, includes):
+        extract_submodules(dep, includes / dep["id"])
         return
 
     # Then try GitHub if repo/ref specified
@@ -259,6 +299,7 @@ def extract_headers(dep: dict, includes: pathlib.Path, allow_qpackages: bool = T
 
     # Fall back to qpackages.com
     extract_headers_from_qpackages(dep, includes)
+    extract_submodules(dep, includes / dep["id"])
 
 
 def download_library(dep: dict, libs: pathlib.Path) -> None:
@@ -302,6 +343,15 @@ def verify_include_paths(manifest: dict, includes: pathlib.Path) -> list:
             candidate = includes / dep["id"] / path
             if not candidate.is_dir():
                 missing.append(f"{dep['id']} {key} '{path}' -> {candidate} does not exist")
+        # A submodule directory that exists but is empty is the shape a GitHub
+        # source tarball leaves behind, and it fails the same silent way: the
+        # relative #include inside the dependency's own headers resolves to
+        # nothing until the compiler reaches it.
+        for submodule in dep.get("submodules") or []:
+            candidate = includes / dep["id"] / submodule["path"]
+            if not candidate.is_dir() or not any(candidate.iterdir()):
+                missing.append(
+                    f"{dep['id']} submodule '{submodule['path']}' ({submodule['repo']}) -> {candidate} is missing or empty")
     return missing
 
 

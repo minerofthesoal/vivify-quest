@@ -16,7 +16,7 @@ target_compile_options(${COMPILE_ID} PRIVATE -DFMT_HEADER_ONLY)
 target_include_directories(${COMPILE_ID} SYSTEM PRIVATE ${EXTERN_DIR}/includes/libil2cpp/libil2cpp)
 target_include_directories(${COMPILE_ID} SYSTEM PRIVATE ${EXTERN_DIR}/includes/libil2cpp/external/baselib/Include)
 target_include_directories(${COMPILE_ID} SYSTEM PRIVATE ${EXTERN_DIR}/includes/libil2cpp/external/baselib/Platforms/Android/Include)
-target_include_directories(${COMPILE_ID} SYSTEM PRIVATE ${EXTERN_DIR}/includes/libil2cpp/external/baselib/Include/External/utfcpp/source)
+target_include_directories(${COMPILE_ID} SYSTEM PRIVATE ${EXTERN_DIR}/includes/paper2_scotland2/shared/utfcpp/source)
 
 target_link_directories(${COMPILE_ID} PRIVATE ${EXTERN_DIR}/libs)
 RECURSE_FILES(so_list ${EXTERN_DIR}/libs/*.so)
