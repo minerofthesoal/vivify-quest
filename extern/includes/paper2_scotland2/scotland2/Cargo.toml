@@ -1,0 +1,17 @@
+[package]
+name = "paper2_scotland2"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+ctor = "0.5"
+mimalloc = "0.1"
+
+paper2 = { path = "../", features = ["logcat", "ffi"] }
+scotland2_rs = { git = "https://github.com/QuestPackageManager/scotland2_rs.git", tag = "v0.2.6" }
+
+[lib]
+crate-type = ["cdylib"]
+
+[build-dependencies]
+cdylib-link-lines = "0.1"

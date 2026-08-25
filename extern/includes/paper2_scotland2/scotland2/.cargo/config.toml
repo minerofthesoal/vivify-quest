@@ -1,0 +1,11 @@
+# https://vr-compare.com/headset/oculusquest2 
+# Quest 2/3 is kryo, minimum supported device
+[build]
+rustflags = [
+    # "-Z",
+    # "sanitizer=address",
+    "-C",
+    "target-cpu=generic",
+    "-C",
+    "target-feature=+v8a,+neon,+tagged-globals,-rcpc",
+]

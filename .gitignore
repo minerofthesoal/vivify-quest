@@ -1,11 +1,34 @@
 ```
-# External includes and dependencies
-extern/includes/
+# Build artifacts and compiled files
+*.hpp
+*.cpp
+*.o
+*.obj
+*.so
+*.a
+*.lib
+*.dll
+*.exe
+*.out
 
-# Build artifacts and libraries
+# Dependency directories
+extern/includes/
 extern/libs/
 
-# Compressed files
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*.tmp
+
+# System and environment files
+*.log
+*.env
+*.env.local
+.env.*
+
+# Compressed archives
 *.zip
 *.gz
 *.tar
@@ -29,57 +52,18 @@ extern/libs/
 *.tar.xz
 *.tar.zst
 
-# Unity/BS related files
-*.unitypackage
+# Unity/C# specific
 *.meta
+*.pidb
+*.sln
+*.csproj
+*.userprefs
+*.user
+*.unitypackage
 
-# Configuration and temporary files
-*.tmp
-*.temp
-*.log
+# BS-Cordl specific
+extern/includes/bs-cordl/
 
-# Editor/IDE files
-.vscode/
-.idea/
-*.swp
-*.swo
-
-# System files
-.DS_Store
-Thumbs.db
-
-# Environment files
-.env
-.env.local
-*.env.*
-
-# Dependency directories (if any subdirectories exist within extern that follow common patterns)
-node_modules/
-__pycache__/
-*.egg-info/
-.Python
-.coverage
-coverage/
-
-# C++ specific
-*.so
-*.a
-*.dylib
-*.dll
-*.exe
-
-# Build system files
-cmake-build-*/
-build/
-dist/
-target/
-.gradle/
-.mypy_cache/
-.pytest_cache/
-htmlcov/
-.coverage
-
-# Zip files (like types.json.zip)
-*.zip
-
+# Version control
+.git/
 ```
