@@ -121,7 +121,7 @@
       "headersOnly": true,
       "compileOptions": {
         "systemIncludes": [
-          "fmt/include/"
+          "include"
         ],
         "cppFlags": [
           "-DFMT_HEADER_ONLY"
@@ -135,9 +135,10 @@
       "headersOnly": true,
       "compileOptions": {
         "systemIncludes": [
-          "libil2cpp/libil2cpp",
-          "libil2cpp/external/baselib/Include",
-          "libil2cpp/external/baselib/Platforms/Android/Include"
+          "libil2cpp",
+          "external/baselib/Include",
+          "external/baselib/Platforms/Android/Include",
+          "external/baselib/Include/External/utfcpp/source"
         ]
       }
     },
@@ -160,11 +161,7 @@
       "soLink": "https://github.com/Fernthedev/paperlog/releases/download/v4.7.0/libpaper2_scotland2.so",
       "modLink": "https://github.com/Fernthedev/paperlog/releases/download/v4.7.0/paper2_scotland2.qmod",
       "overrideSoName": "libpaper2_scotland2.so",
-      "compileOptions": {
-        "systemIncludes": [
-          "shared/utfcpp/source"
-        ]
-      },
+      "_utfcpp_note": "paper2 declares systemInclude shared/utfcpp/source, but that is a git submodule the release tarball does not carry, so the directory never exists and CMake silently drops it. Only shared/string_convert.hpp needs it and nothing in this project includes that header. libil2cpp vendors a utfcpp copy (listed on that dependency) so <utf8/...> at least resolves; note its cpp11.h and cpp17.h redefine each other, so string_convert.hpp would still need paper2's own submodule to compile.",
       "cmake": false
     },
     {
