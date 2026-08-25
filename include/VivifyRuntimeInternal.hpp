@@ -1,5 +1,6 @@
 #pragma once
 #include <string>
+#include <chrono>
 #include <vector>
 #include <array>
 #include <unordered_map>
@@ -112,6 +113,8 @@ private:
   void PreloadBundle(std::string const& bundlePath);
   void LoadMainBundle();
   void CacheBundleAssets();
+  // True once the watchdog has stood Vivify down for this level.
+  bool SelfDisabled() const { return _selfDisabledThisLevel; }
   // Reports, per bundle, how many shaders can actually draw here and why the
   // rest cannot -- separating "no Android program was ever compiled" from
   // "this GPU refuses every subshader", which need completely different fixes.
@@ -377,6 +380,20 @@ private:
   bool _loggedUnityPlatformInfo = false;
   bool _pauseMenuActive = false;
   bool _isResetting = false;
+
+  // Watchdog. Vivify does a lot of work on the main thread at level load --
+  // realising every asset in a bundle, decoding block-compressed textures,
+  // repairing shaders -- and any of it running long turns into a frozen game
+  // that has to be force-quit, with no indication of which part was to blame.
+  //
+  // Rather than trust each individual path to stay fast, per-frame work is
+  // timed. A sustained run of frames over budget makes Vivify stand down for
+  // the rest of the level and say so: the map loses its Vivify visuals, which
+  // is bad, but the game keeps running and the log names the phase.
+  bool _selfDisabledThisLevel = false;
+  bool _fallbackShaderSearchFailed = false;
+  int _slowFrameStreak = 0;
+  double _worstFrameMs = 0.0;
 
   bool _reduceDebris = false;
   bool _reduceDebrisCached = false;

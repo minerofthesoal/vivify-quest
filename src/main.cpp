@@ -184,19 +184,33 @@ void RegisterModSettings() {
         // those levels become playable without having to be playable first.
         gConvertStatusText = BSML::Lite::CreateText(container->get_transform(), u"Idle");
         if (Vivify::IsBulkPcBundleConversionRunning()) SetConvertStatusText("Converting...");
-        BSML::Lite::CreateUIButton(
-            container->get_transform(), u"Convert All PC Bundles Now", []() {
-              if (Vivify::IsBulkPcBundleConversionRunning()) return;
-              SetConvertStatusText("Scanning...");
-              Vivify::StartBulkPcBundleConversion([](Vivify::BulkConversionProgress const& progress) {
+        // One progress callback for both buttons; they differ only in whether an
+        // already-cached conversion is reused or thrown away first.
+        static auto const startConversion = [](bool force) {
+          if (Vivify::IsBulkPcBundleConversionRunning()) return;
+          SetConvertStatusText(force ? "Reconverting..." : "Scanning...");
+          Vivify::StartBulkPcBundleConversion(
+              [](Vivify::BulkConversionProgress const& progress) {
                 if (progress.finished) {
                   SetConvertStatusText(progress.status);
                   return;
                 }
                 SetConvertStatusText(std::to_string(progress.levelsScanned) + "/" +
                                      std::to_string(progress.levelsTotal) + "  " + progress.status);
-              });
-            });
+              },
+              force);
+        };
+
+        BSML::Lite::CreateUIButton(
+            container->get_transform(), u"Convert All PC Bundles Now",
+            []() { startConversion(false); });
+
+        // A cached conversion is keyed on the source bundle, so it is reused
+        // even after the converter itself has been fixed. This is the way to
+        // pick those fixes up without deleting the cache directory by hand.
+        BSML::Lite::CreateUIButton(
+            container->get_transform(), u"Force Reconvert All (ignore cache)",
+            []() { startConversion(true); });
       },
       "Vivify", false);
 }
