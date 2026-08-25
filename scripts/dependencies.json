@@ -57,7 +57,7 @@
     },
     {
       "id": "conditional-dependencies",
-      "version": "0.3.0",
+      "version": "0.2.0",
       "repo": "sc2ad/ConditionalDependencies",
       "ref": "v0.2.0",
       "headersOnly": true,
@@ -167,6 +167,8 @@
     {
       "id": "rapidjson-macros",
       "version": "2.1.0",
+      "repo": "Metalit/RapidjsonMacros",
+      "ref": "v2.1.0",
       "headersOnly": true,
       "cmake": false
     },
@@ -183,6 +185,8 @@
     {
       "id": "sombrero",
       "version": "0.1.43",
+      "repo": "Fernthedev/Sombrero-quest",
+      "ref": "v0.1.43",
       "headersOnly": true
     },
     {

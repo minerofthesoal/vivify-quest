@@ -1,3 +1,4 @@
+```
 # Dependencies
 node_modules/
 .venv/
@@ -5,8 +6,6 @@ venv/
 __pycache__/
 .mypy_cache/
 .pytest_cache/
-.julia/
-zig*/
 target/
 .gradle/
 
@@ -46,9 +45,6 @@ coverage/
 htmlcov/
 .coverage
 
-# Temp files
-*.tmp
-
 # Compressed files
 *.zip
 *.gz
@@ -72,3 +68,4 @@ htmlcov/
 *.tar.bz2
 *.tar.xz
 *.tar.zst
+```
