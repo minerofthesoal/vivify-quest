@@ -1,6 +1,9 @@
 #include "VivifyRuntimeInternal.hpp"
 #include "VivifyComponents.hpp"
 #include "VivifyBundleConvert.hpp"
+#include "VivifyTextureDecode.hpp"
+#include "UnityEngine/Texture2D.hpp"
+#include "UnityEngine/TextureFormat.hpp"
 #include <atomic>
 #include <cstdio>
 #include <cstring>
@@ -708,6 +711,7 @@ void Runtime::LoadMainBundle() {
       PaperLogger.info("Vivify bundle preloaded, rebuilding asset caches: '{}'", bundlePath);
     }
     CacheBundleAssets();
+    DecodeUnsupportedBundleTextures();
     RepairLoadedMaterialShaders();
     return;
   }
@@ -723,6 +727,7 @@ void Runtime::LoadMainBundle() {
   }
   _preloadedBundlePath = bundlePath;
   CacheBundleAssets();
+  DecodeUnsupportedBundleTextures();
   RepairLoadedMaterialShaders();
 }
 
@@ -1045,6 +1050,116 @@ void Runtime::RefreshLoadedMaterialStereoKeywords() {
     } else if (auto* gameObject = il2cpp_utils::try_cast<UnityEngine::GameObject>(asset).value_or(nullptr); IsAlive(gameObject)) {
       ApplyGameObjectStereoKeywords(gameObject);
     }
+  }
+}
+
+
+// Decodes a block-compressed texture this GPU cannot sample into RGBA32.
+//
+// Quest's Adreno GPUs support ETC2 and ASTC but not S3TC/BC, and a PC-built
+// AssetBundle stores its textures as BC1/BC3/BC7. Unity will happily hand back
+// the Texture2D object, but nothing can sample it -- which is why converted
+// maps came through untextured even once their materials carried the right
+// colour. Decoding on the CPU costs memory (BC1 is 4 bits per pixel, RGBA32 is
+// 32) but produces something that actually renders.
+//
+// Requires the source texture's raw bytes to still be available; a texture
+// imported without read/write enabled may have had its CPU copy dropped, in
+// which case there is nothing to decode and the original is returned unchanged.
+UnityEngine::Texture* Runtime::ResolveUsableTexture(UnityEngine::Texture* texture) {
+  if (!IsAlive(texture)) return texture;
+  if (auto cached = _decodedTextures.find(texture); cached != _decodedTextures.end()) {
+    return IsAlive(cached->second) ? cached->second : texture;
+  }
+
+  auto* source = il2cpp_utils::try_cast<UnityEngine::Texture2D>(texture).value_or(nullptr);
+  if (!IsAlive(source)) return texture;
+
+  int const unityFormat = source->get_format().value__;
+  if (UnityEngine::SystemInfo::SupportsTextureFormat(source->get_format())) {
+    _decodedTextures[texture] = nullptr;
+    return texture;
+  }
+
+  auto const format = TextureDecode::FromUnityTextureFormat(unityFormat);
+  std::string const name = ToStdString(source->get_name());
+  if (format == TextureDecode::Format::Unsupported) {
+    PaperLogger.warn("Vivify texture '{}': format {} is unsupported here and cannot be decoded", name, unityFormat);
+    _decodedTextures[texture] = nullptr;
+    return texture;
+  }
+
+  int const width = source->get_width();
+  int const height = source->get_height();
+  int const mipCount = std::max(1, source->get_mipmapCount());
+
+  ArrayW<uint8_t, Array<uint8_t>*> raw = nullptr;
+  try {
+    raw = source->GetRawTextureData();
+  } catch (...) {
+    raw = nullptr;
+  }
+  if (!raw || raw.size() == 0) {
+    PaperLogger.warn("Vivify texture '{}' ({}, {}x{}): no raw data available to decode -- the texture was "
+                     "imported without read/write enabled, so its CPU copy is gone",
+                     name, TextureDecode::FormatName(format), width, height);
+    _decodedTextures[texture] = nullptr;
+    return texture;
+  }
+
+  std::vector<uint8_t> decoded;
+  if (!TextureDecode::DecodeToRgba32(format, raw.begin(), static_cast<size_t>(raw.size()), width, height, mipCount,
+                                     decoded)) {
+    PaperLogger.warn("Vivify texture '{}' ({}, {}x{}, {} mip(s)): {} byte(s) of data did not decode",
+                     name, TextureDecode::FormatName(format), width, height, mipCount, raw.size());
+    _decodedTextures[texture] = nullptr;
+    return texture;
+  }
+
+  auto* replacement = UnityEngine::Texture2D::New_ctor(width, height, UnityEngine::TextureFormat::RGBA32,
+                                                       mipCount, false);
+  if (!IsAlive(replacement)) {
+    _decodedTextures[texture] = nullptr;
+    return texture;
+  }
+  auto managed = ArrayW<uint8_t, Array<uint8_t>*>(static_cast<il2cpp_array_size_t>(decoded.size()));
+  std::memcpy(managed.begin(), decoded.data(), decoded.size());
+  replacement->LoadRawTextureData(managed);
+  replacement->Apply();
+  replacement->set_wrapMode(source->get_wrapMode());
+  replacement->set_filterMode(source->get_filterMode());
+  replacement->set_name(StringW(name + " (decoded)"));
+
+  PaperLogger.info("Vivify texture decoded: '{}' {} {}x{} ({} mip(s)) -> RGBA32", name,
+                   TextureDecode::FormatName(format), width, height, mipCount);
+  _decodedTextures[texture] = replacement;
+  return replacement;
+}
+
+// Walks every material in the bundle and swaps any texture this GPU cannot
+// sample for a decoded copy. Runs once per bundle load, before shader repair,
+// so a material that keeps its own working shader still gets usable textures.
+void Runtime::DecodeUnsupportedBundleTextures() {
+  int swapped = 0;
+  for (auto const& [path, asset] : _assets) {
+    auto* material = il2cpp_utils::try_cast<UnityEngine::Material>(asset).value_or(nullptr);
+    if (!IsAlive(material)) continue;
+    auto names = material->GetPropertyNames(UnityEngine::MaterialPropertyType::Texture);
+    if (!names) continue;
+    for (auto name : names) {
+      if (!name) continue;
+      auto* current = material->GetTexture(name).unsafePtr();
+      if (!IsAlive(current)) continue;
+      auto* usable = ResolveUsableTexture(current);
+      if (IsAlive(usable) && usable != current) {
+        material->SetTexture(name, usable);
+        swapped++;
+      }
+    }
+  }
+  if (swapped > 0) {
+    PaperLogger.info("Vivify texture decode: replaced {} unsupported texture reference(s) across bundle materials",
+                     swapped);
   }
 }
 

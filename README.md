@@ -205,9 +205,24 @@ properties, skipping normal/mask/metallic-style maps that would look wrong as an
 albedo, and writes the result to whichever of `_MainTex`/`_BaseMap` the stand-in
 declares.
 
-Textures whose *pixel data* is BC/DXT-compressed still cannot be decoded by an
-Adreno GPU — that part is unfixable on device — but colour now comes through,
-which is the difference between a white mesh and a correctly tinted one.
+**Textures are decoded on the CPU.** Quest's Adreno GPUs support ETC2 and ASTC
+but not S3TC/BC, and a PC-built AssetBundle stores its textures as BC1/BC3/BC7.
+Unity hands back the `Texture2D` quite happily; nothing can sample it. Vivify
+now decodes those blocks to RGBA32 on load, using the vendored
+[`bcdec.h`](include/third_party/) (single header, no includes of its own,
+MIT/public-domain), and swaps the decoded copy into every material that
+referenced the original. It costs memory — BC1 is 4 bits per pixel, RGBA32 is
+32 — but it is the difference between an untextured mesh and a textured one.
+
+This needs the source texture's raw bytes to still be around. A texture
+imported without read/write enabled may have had its CPU copy dropped after
+upload, and there is then nothing to decode; that case is logged per texture
+and the original is left alone rather than guessed at.
+
+`src/VivifyTextureDecode.cpp` has no Unity dependency and is covered by a host
+test suite (`tools/texturedecode/`) that decodes hand-built BC1/BC3 blocks and
+checks the resulting pixels, including non-multiple-of-four sizes, full mip
+chains and every refusal path — run in CI under ASan/UBSan.
 
 **Stand-ins can only carry so much.** A stand-in shader is a trade: "invisible"
 becomes "visible but wrong", and for a converted PC bundle "wrong" is often flat

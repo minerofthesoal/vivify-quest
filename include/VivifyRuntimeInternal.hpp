@@ -127,6 +127,10 @@ private:
   void LogMaterialShader(std::string_view context, std::string_view assetPath, UnityEngine::Material* material) const;
   UnityEngine::Shader* FindUsableShader(std::string const& shaderName) const;
   UnityEngine::Shader* FindFallbackShader();
+  // Returns a GPU-usable stand-in for a block-compressed texture this device
+  // cannot sample, decoding it once and caching the result.
+  UnityEngine::Texture* ResolveUsableTexture(UnityEngine::Texture* texture);
+  void DecodeUnsupportedBundleTextures();
   void RepairMaterialShader(UnityEngine::Material* material, std::string_view context = {});
   void RepairGameObjectMaterials(UnityEngine::GameObject* gameObject, std::string_view context = {});
   void ApplyStereoKeywords(UnityEngine::Material* material) const;
@@ -391,6 +395,9 @@ private:
   // Materials whose original shader could not run here and were given the
   // generic stand-in. Fine for geometry, never valid for a full-screen blit.
   std::unordered_set<UnityEngine::Material*> _fallbackShadedMaterials;
+  // Original (undecodable) texture -> decoded RGBA32 replacement. nullptr value
+  // means it was tried and could not be decoded, so it is not retried.
+  std::unordered_map<UnityEngine::Texture*, UnityEngine::Texture*> _decodedTextures;
   int _shaderRepairAttempts = 0;
   int _shaderRepairSucceeded = 0;
   int _shaderRepairFailed = 0;
