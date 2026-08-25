@@ -36,6 +36,36 @@ def fetch(url: str) -> bytes:
         return response.read()
 
 
+def extract_headers_from_local(dep: dict, includes: pathlib.Path) -> bool:
+    """Check if headers are already bundled locally and copy them."""
+    dep_id = dep["id"]
+    local_include_dir = ROOT / "extern" / "includes" / dep_id
+    
+    if local_include_dir.exists():
+        destination = includes / dep_id
+        if destination.exists():
+            shutil.rmtree(destination)
+        shutil.copytree(local_include_dir, destination)
+        print(f"  headers  {dep_id:<26} (bundled locally)")
+        return True
+    return False
+
+def extract_library_from_local(dep: dict, libs: pathlib.Path) -> bool:
+    """Check if library is already bundled locally and copy it."""
+    dep_id = dep["id"]
+    additional_data = dep.get("additionalData", {})
+    lib_name = additional_data.get("overrideSoName", f"lib{dep_id.replace('-', '_')}.so")
+    
+    local_lib_path = ROOT / "extern" / "libs" / lib_name
+    
+    if local_lib_path.exists():
+        destination = libs / lib_name
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(local_lib_path, destination)
+        print(f"  library  {dep_id:<26} {lib_name} (bundled locally)")
+        return True
+    return False
+
 def extract_headers_from_github(dep: dict, includes: pathlib.Path) -> None:
     """Download <repo> at <ref> from GitHub and unpack it to includes/<id>/."""
     repo, ref, dep_id = dep["repo"], dep["ref"], dep["id"]
@@ -164,18 +194,28 @@ def extract_headers_from_qpackages(dep: dict, includes: pathlib.Path) -> None:
 
 
 def extract_headers(dep: dict, includes: pathlib.Path) -> None:
-    """Download headers from GitHub if repo/ref specified, otherwise from qpackages.com."""
+    """Download headers from local bundle first, then GitHub, then qpackages.com."""
+    # First try local bundled packages
+    if extract_headers_from_local(dep, includes):
+        return
+    
+    # Then try GitHub if repo/ref specified
     if dep.get("repo") and dep.get("ref"):
         try:
             extract_headers_from_github(dep, includes)
             return
         except (urllib.error.URLError, urllib.error.HTTPError) as e:
             print(f"  WARNING  {dep['id']:<26} GitHub failed: {e}, trying qpackages.com")
+    
     # Fall back to qpackages.com
     extract_headers_from_qpackages(dep, includes)
 
 
 def download_library(dep: dict, libs: pathlib.Path) -> None:
+    # First try local bundled libraries
+    if extract_library_from_local(dep, libs):
+        return
+    
     url = dep.get("soLink")
     if not url:
         return

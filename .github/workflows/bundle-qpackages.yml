@@ -1,0 +1,54 @@
+name: Bundle QPackages Dependencies
+
+on:
+  workflow_dispatch:
+    description: "Bundle all qpackages.com dependencies locally"
+    inputs:
+      force_rebundle:
+        description: "Force re-bundling even if packages exist"
+        required: false
+        default: 'false'
+  push:
+    paths:
+      - 'scripts/dependencies.json'
+
+jobs:
+  bundle-packages:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests
+
+      - name: Bundle all qpackages.com dependencies
+        run: |
+          python scripts/bundle-qpackages.py
+        env:
+          FORCE_REBUNDLE: ${{ github.event.inputs.force_rebundle || 'false' }}
+
+      - name: Show bundled packages
+        run: |
+          echo "=== Bundled Includes ==="
+          ls -la extern/includes/ 2>/dev/null || echo "No includes bundled yet"
+          echo ""
+          echo "=== Bundled Libraries ==="
+          ls -la extern/libs/ 2>/dev/null || echo "No libraries bundled yet"
+
+      - name: Commit and push bundled packages
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: "chore: bundle qpackages.com dependencies locally [skip ci]"
+          file_pattern: "extern/includes/* extern/libs/*"
+          branch: ${{ github.ref_name }}
+          skip_checkout: true
