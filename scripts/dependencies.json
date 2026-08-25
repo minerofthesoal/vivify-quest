@@ -132,9 +132,9 @@
       "headersOnly": true,
       "compileOptions": {
         "systemIncludes": [
-          "il2cpp/libil2cpp",
-          "il2cpp/external/baselib/Include",
-          "il2cpp/external/baselib/Platforms/Android/Include"
+          "libil2cpp/libil2cpp",
+          "libil2cpp/external/baselib/Include",
+          "libil2cpp/external/baselib/Platforms/Android/Include"
         ]
       }
     },

@@ -1,59 +1,119 @@
 ```
-# Dependencies
-node_modules/
-.venv/
-venv/
-__pycache__/
-.mypy_cache/
-.pytest_cache/
-target/
-.gradle/
-
-# Build artifacts
-dist/
-build/
-*.pyc
-*.class
-*.o
-*.exe
-*.dll
+# Build artifacts and libraries
 *.so
-*.a
+extern/libs/
+
+# Compressed archives
+*.zip
+
+# Build system files
+*.o
 *.obj
+*.a
+*.lib
+*.dll
+*.dylib
+*.exe
 *.out
 
-# Environment
-.env
-.env.local
-*.env.*
+# Dependencies
+node_modules/
+vendor/
+third-party/
 
-# Editors
+# Temporary and cache files
+*.tmp
+*.temp
+*.cache
+*.swp
+*.swo
+
+# Logs
+*.log
+
+# IDE and editor files
 .vscode/
 .idea/
 *.swp
 *.swo
 
-# System
-.DS_Store
-Thumbs.db
+# Environment variables
+.env
+.env.local
+*.env.*
 
-# Logs
-*.log
-
-# Coverage
+# Coverage reports
 coverage/
 htmlcov/
-.coverage
 
-# Compressed files
+# Python specific
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+dist/
+build/
+*.egg-info/
+
+# C/C++ specific
+*.o
+*.obj
+*.a
+*.lib
+*.dll
+*.dylib
+*.so
+*.exe
+*.out
+*.ilk
+*.pdb
+*.exp
+*.gch
+*.gcda
+*.gcno
+*.gcov
+
+# Java specific
+*.class
+*.jar
+*.war
+*.ear
+*.nar
+target/
+build/
+.gradle/
+!extern/includes/il2cpp/**
+
+# Android specific
+*.apk
+*.aar
+*.dex
+app/build/
+
+# iOS specific
+*.ipa
+*.dSYM/
+build/
+
+# Web specific
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Archives
 *.zip
-*.gz
+*.rar
 *.tar
-*.tgz
+*.gz
 *.bz2
 *.xz
 *.7z
-*.rar
+*.tgz
+*.tbz2
+*.txz
 *.zst
 *.lz4
 *.lzh
@@ -68,4 +128,285 @@ htmlcov/
 *.tar.bz2
 *.tar.xz
 *.tar.zst
+
+# System files
+.DS_Store
+Thumbs.db
+desktop.ini
+ehthumbs.db
+Icon?
+.nfs*
+*~
+
+# Configuration management
+.svn/
+CVS/
+.git/
+!.gitignore
+
+# CI/CD
+.github/
+.gitlab/
+.travis.yml
+appveyor.yml
+circle.yml
+.codecov.yml
+codecov.yml
+.jenkinsfile
+.drone.yml
+.shippable.yml
+.codeship.yml
+.semaphore.yml
+.teamcity/
+.bamboo/
+.cloudbuild.yaml
+cloudbuild.yaml
+tekton/
+
+# Development tools
+.vs/
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# Local configuration
+config.local.*
+settings.local.*
+local.properties
+gradle.properties
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+*:Zone.Identifier
+
+# Backup files
+*~
+*.bak
+*.backup
+*.old
+*.orig
+*.rej
+*.tmp
+*.temp
+*.swp
+*.swo
+
+# Database
+*.db
+*.db-journal
+*.sqlite
+*.sqlite3
+
+# Secrets
+secrets/
+credentials.json
+*.key
+*.pem
+*.crt
+*.cert
+
+# Documentation
+docs/_build/
+docs/build/
+
+# Virtual environments
+venv/
+env/
+ENV/
+.venv/
+.env/
+.envs/
+
+# Bazel
+bazel-*
+/bazel-out/
+/blaze-out/
+
+# Meson
+meson-private/
+meson.build
+
+# Conan
+conan.lock
+conanbuildinfo.props
+
+# Vcpkg
+vcpkg-manifest-lock.json
+
+# NuGet
+*.nupkg
+*.snupkg
+packages/
+nuget.exe
+
+# Maven
+.mvn/
+.m2/
+
+# Gradle
+.gradle/
+!extern/includes/il2cpp/**
+
+# CMake
+CMakeFiles/
+CMakeCache.txt
+cmake_install_manifest.txt
+Makefile
+cmake-build-*/
+build/
+
+# Autotools
+autom4te.cache/
+.libs/
+.deps/
+.libs-hidden/
+aclocal.m4
+config.guess
+config.log
+config.status
+config.sub
+configure
+install-sh
+missing
+stamp-h1
+.libs/
+
+# QEMU
+*.qcow2
+*.img
+*.iso
+
+# Docker
+.docker/
+!extern/includes/il2cpp/**
+
+# Unity specific
+Library/
+Temp/
+Obj/
+Build/
+*.unitypackage
+!extern/includes/il2cpp/**
+
+# Unreal Engine specific
+Binaries/
+Intermediate/
+Saved/
+*.uproject
+!extern/includes/il2cpp/**
+
+# Godot specific
+.import/
+export_presets.cfg
+!extern/includes/il2cpp/**
+
+# Qt specific
+*.pro.user
+*.pro.user.*
+*.qm
+!extern/includes/il2cpp/**
+
+# Go specific
+*.exe
+*.dll
+*.so
+*.dylib
+!extern/includes/il2cpp/**
+
+# Rust specific
+Cargo.lock
+!extern/includes/il2cpp/**
+
+# Ruby specific
+Gemfile.lock
+.bundle/
+vendor/bundle/
+!extern/includes/il2cpp/**
+
+# PHP specific
+composer.lock
+vendor/
+!extern/includes/il2cpp/**
+
+# Perl specific
+blib/
+pm_to_blib/
+*.tar.gz
+!extern/includes/il2cpp/**
+
+# R specific
+.Rhistory
+.RData
+.Rproj.user/
+!extern/includes/il2cpp/**
+
+# MATLAB specific
+*.fig
+*.mat
+*.mex*
+*.p
+!extern/includes/il2cpp/**
+
+# Erlang specific
+.erlang.cookie
+.eunit/
+!extern/includes/il2cpp/**
+
+# Elixir specific
+mix.lock
+!extern/includes/il2cpp/**
+
+# Haskell specific
+dist/
+dist-newstyle/
+.cabal-sandbox/
+cabal.sandbox.config
+*.o
+*.hi
+!extern/includes/il2cpp/**
+
+# Clojure specific
+target/
+!extern/includes/il2cpp/**
+
+# Scala specific
+target/
+!extern/includes/il2cpp/**
+
+# .NET specific
+bin/
+obj/
+!extern/includes/il2cpp/**
+
+# Mono specific
+!extern/includes/il2cpp/**
+
+# IL2CPP specific
+!extern/includes/il2cpp/**
+
+# BS-Cordl specific
+!extern/includes/bs-cordl/**
+
+# Include specific directories (unignored to ensure they're tracked)
+!extern/includes/
+!extern/includes/il2cpp/
+!extern/includes/bs-cordl/
+!extern/includes/conditional-dependencies/
+!extern/includes/fmt/
+!extern/includes/rapidjson-macros/
+!extern/includes/sombrero/
+!extern/includes/tinyxml2/
+!extern/includes/tracks/
+!extern/includes/web-utils/
+
 ```

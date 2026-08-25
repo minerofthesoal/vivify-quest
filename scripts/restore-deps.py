@@ -75,36 +75,92 @@ def extract_headers_from_github(dep: dict, includes: pathlib.Path) -> None:
 def extract_headers_from_qpackages(dep: dict, includes: pathlib.Path) -> None:
     """Download headers from qpackages.com and unpack to includes/<id>/."""
     dep_id, version = dep["id"], dep["version"]
-    url = f"https://qpackages.com/packages/{dep_id}/{version}/download"
+    
+    # First try to get metadata from qpackages.com to find the actual download URL
+    metadata_url = f"https://qpackages.com/{dep_id}/{version}"
     print(f"  headers  {dep_id:<26} {version} (qpackages.com)")
-    blob = fetch(url)
+    
+    try:
+        metadata_blob = fetch(metadata_url)
+        metadata = json.loads(metadata_blob.decode('utf-8'))
+        
+        # Extract the actual download URL from metadata
+        download_url = metadata.get('config', {}).get('info', {}).get('url')
+        if not download_url:
+            raise RuntimeError(f"No download URL found in qpackages metadata for {dep_id}@{version}")
+        
+        print(f"           Downloading from: {download_url}")
+        blob = fetch(download_url)
+    except Exception as e:
+        print(f"  FAILED   {dep_id:<26} qpackages.com metadata error: {e}")
+        raise
 
     destination = includes / dep_id
     if destination.exists():
         shutil.rmtree(destination)
     destination.mkdir(parents=True)
 
-    with tarfile.open(fileobj=io.BytesIO(blob), mode="r:gz") as archive:
-        members = archive.getmembers()
-        # qpackages may wrap the tree; strip the root directory if present
-        root = members[0].name.split("/", 1)[0] + "/" if members else ""
-        for member in members:
-            if not member.name.startswith(root):
-                continue
-            relative = member.name[len(root):]
-            if not relative:
-                continue
-            # Refuse anything that would escape the destination directory.
-            target = (destination / relative).resolve()
-            if not str(target).startswith(str(destination.resolve())):
-                raise RuntimeError(f"{dep_id}: archive entry escapes destination: {member.name}")
-            if member.isdir():
-                target.mkdir(parents=True, exist_ok=True)
-            elif member.isreg():
-                target.parent.mkdir(parents=True, exist_ok=True)
-                source = archive.extractfile(member)
-                if source is not None:
-                    target.write_bytes(source.read())
+    # qpackages may return either .tar.gz or .zip files
+    # Try tar.gz first, then zip if that fails
+    import zipfile
+    
+    extracted = False
+    
+    # Try tar.gz format first
+    try:
+        with tarfile.open(fileobj=io.BytesIO(blob), mode="r:gz") as archive:
+            members = archive.getmembers()
+            # qpackages may wrap the tree; strip the root directory if present
+            root = members[0].name.split("/", 1)[0] + "/" if members else ""
+            for member in members:
+                if not member.name.startswith(root):
+                    continue
+                relative = member.name[len(root):]
+                if not relative:
+                    continue
+                # Refuse anything that would escape the destination directory.
+                target = (destination / relative).resolve()
+                if not str(target).startswith(str(destination.resolve())):
+                    raise RuntimeError(f"{dep_id}: archive entry escapes destination: {member.name}")
+                if member.isdir():
+                    target.mkdir(parents=True, exist_ok=True)
+                elif member.isreg():
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    source = archive.extractfile(member)
+                    if source is not None:
+                        target.write_bytes(source.read())
+        extracted = True
+    except tarfile.ReadError:
+        # Not a tar.gz, try zip format
+        pass
+    
+    if not extracted:
+        # Try zip format
+        try:
+            with zipfile.ZipFile(io.BytesIO(blob)) as zip_ref:
+                # Find root directory
+                names = zip_ref.namelist()
+                root = names[0].split("/", 1)[0] + "/" if names else ""
+                
+                for name in names:
+                    if not name.startswith(root):
+                        continue
+                    relative = name[len(root):]
+                    if not relative:
+                        continue
+                    
+                    target = destination / relative
+                    if name.endswith('/'):
+                        target.mkdir(parents=True, exist_ok=True)
+                    else:
+                        target.parent.mkdir(parents=True, exist_ok=True)
+                        target.write_bytes(zip_ref.read(name))
+            extracted = True
+        except zipfile.BadZipFile:
+            raise RuntimeError(f"Downloaded file for {dep_id}@{version} is neither valid tar.gz nor zip")
+    
+    if not extracted:
+        raise RuntimeError(f"Failed to extract archive for {dep_id}@{version}")
 
 
 def extract_headers(dep: dict, includes: pathlib.Path) -> None:
