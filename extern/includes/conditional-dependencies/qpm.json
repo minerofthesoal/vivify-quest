@@ -1,0 +1,22 @@
+{
+  "sharedDir": "shared",
+  "dependenciesDir": "extern",
+  "info": {
+    "name": "Conditional Dependencies",
+    "id": "conditional-dependencies",
+    "version": "0.2.0",
+    "url": "https://github.com/sc2ad/ConditionalDependencies",
+    "additionalData": {
+      "headersOnly": true,
+      "branchName": "version-v0.2.0"
+    }
+  },
+  "dependencies": [
+    {
+      "id": "modloader",
+      "versionRange": "*",
+      "additionalData": {}
+    }
+  ],
+  "additionalData": {}
+}
