@@ -746,11 +746,43 @@ UnityEngine::Object* Runtime::GetAssetObject(std::string_view assetName) const {
   return nullptr;
 }
 
+// Names the graphics API, which decides whether a shader stage like a geometry
+// shader can exist on this device at all.
+//
+// Adreno exposes GL_EXT_geometry_shader under OpenGL ES 3.2, but reports
+// VkPhysicalDeviceFeatures.geometryShader as false under Vulkan -- Qualcomm has
+// never supported geometry or tessellation stages in their Vulkan driver. So on
+// Vulkan a geometry shader cannot run here no matter what the bundle contains,
+// and no mod-side setting changes that: the graphics API is baked into the
+// game's APK at build time.
+std::string_view GraphicsApiName(int32_t graphicsDeviceType) {
+  switch (graphicsDeviceType) {
+    case 0x0b: return "OpenGLES3";
+    case 0x10: return "Metal";
+    case 0x11: return "OpenGLCore";
+    case 0x15: return "Vulkan";
+    default: return "other";
+  }
+}
+
 void Runtime::LogUnityPlatformInfoOnce() {
-  if (!GetVivifyDebugLogging() || _loggedUnityPlatformInfo) return;
+  if (_loggedUnityPlatformInfo) return;
   _loggedUnityPlatformInfo = true;
   auto stereoMode = UnityEngine::XR::XRSettings::get_stereoRenderingMode();
   auto graphicsType = UnityEngine::SystemInfo::get_graphicsDeviceType();
+  int const shaderLevel = UnityEngine::SystemInfo::get_graphicsShaderLevel();
+
+  // Shader level is reported as 10x the shader model: 45 is SM4.5. Geometry
+  // stages need SM4.0, so anything below 40 rules them out outright; at or
+  // above 40 it comes down to the API above.
+  PaperLogger.info(
+      "Vivify graphics: api={} ({}) shaderLevel={} (SM{}.{}) geometryShaderStagePossible={}",
+      GraphicsApiName(graphicsType.value__), graphicsType.value__, shaderLevel, shaderLevel / 10,
+      shaderLevel % 10,
+      BoolText(shaderLevel >= 40 && graphicsType.value__ != 0x15));
+
+  if (!GetVivifyDebugLogging()) return;
+
   PaperLogger.info(
       "Vivify platform: os='{}' device='{}' gpu='{}' vendor='{}' api={} stereoMode={} xrOcclusionMesh={} supportsInstancing={} supportsR8={} supportsDepthRT={}",
       ToStdString(UnityEngine::SystemInfo::get_operatingSystem()),

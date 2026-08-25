@@ -279,6 +279,38 @@ reason in a comment at the top of its controller: assigning a target texture
 disables stereo on the camera. Capture now happens per-eye in `OnRenderImage`,
 matching upstream.
 
+### Geometry shaders
+
+Not something this port can enable, and worth being clear about rather than
+leaving as an open request.
+
+Whether a geometry stage can run at all is decided by the graphics API the game
+was built against, which is baked into the APK — there is no runtime switch a
+mod can flip. Adreno exposes `GL_EXT_geometry_shader` under OpenGL ES 3.2, but
+reports `VkPhysicalDeviceFeatures.geometryShader` as false under Vulkan;
+Qualcomm has never supported geometry or tessellation stages in their Vulkan
+driver. So under Vulkan a geometry shader cannot execute on this hardware no
+matter what a bundle contains.
+
+Vivify now logs the answer on the first level load, unconditionally:
+
+```
+Vivify graphics: api=Vulkan (21) shaderLevel=45 (SM4.5) geometryShaderStagePossible=false
+```
+
+(`SystemInfo.supportsGeometryShaders` cannot be used for this — Unity removed it,
+and it is absent from the codegen headers this port builds against. The graphics
+API plus shader level is the reliable substitute: a geometry stage needs SM4.0,
+so below 40 rules it out outright, and at or above 40 it comes down to the API.)
+
+Even where the API allows it, a *converted* PC bundle still cannot supply one:
+its shaders are DirectX bytecode, and no geometry stage can be recovered from
+that or recompiled on device. A map relying on geometry shaders needs a bundle
+built for Android by the mapper, on a build of the game using an API that
+supports them. Where neither holds, the shader reports itself unsupported and
+the stand-in path takes over, so the level stays playable with wrong visuals
+rather than failing outright.
+
 **Converted PC bundles cannot raymarch.** Worth stating plainly: none of the
 above rescues a screen effect from a converted Windows bundle, because the
 shader is DirectX bytecode with no GLES program and cannot be recompiled on
