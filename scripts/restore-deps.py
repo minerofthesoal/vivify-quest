@@ -61,21 +61,49 @@ def extract_headers_from_local(dep: dict, includes: pathlib.Path) -> bool:
     print(f"  headers  {dep_id:<26} (bundled locally)")
     return True
 
+def library_file_name(dep: dict) -> str:
+    """The file name a dependency's native library is stored under.
+
+    Must agree between the local-bundle check and the download, or the two
+    disagree about whether a library is already present. overrideSoName lives at
+    the top level of a manifest entry; it was previously read from a nested
+    "additionalData" key that the manifest never had, so this always fell
+    through to the guess below. That guess turns hyphens into underscores, so
+    for every hyphenated id (beatsaber-hook, custom-types, web-utils, ...) it
+    looked for a file that does not exist and re-downloaded a library already
+    sitting in extern/libs.
+    """
+    override = dep.get("overrideSoName") or (dep.get("additionalData") or {}).get("overrideSoName")
+    if override:
+        return override
+    url = dep.get("soLink")
+    if url:
+        return url.rsplit("/", 1)[-1]
+    return f"lib{dep['id'].replace('-', '_')}.so"
+
+
 def extract_library_from_local(dep: dict, libs: pathlib.Path) -> bool:
-    """Check if library is already bundled locally and copy it."""
+    """Use a library already bundled in extern/libs, if there is one."""
     dep_id = dep["id"]
-    additional_data = dep.get("additionalData", {})
-    lib_name = additional_data.get("overrideSoName", f"lib{dep_id.replace('-', '_')}.so")
-    
+    lib_name = library_file_name(dep)
     local_lib_path = ROOT / "extern" / "libs" / lib_name
-    
-    if local_lib_path.exists():
-        destination = libs / lib_name
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(local_lib_path, destination)
-        print(f"  library  {dep_id:<26} {lib_name} (bundled locally)")
+
+    if not local_lib_path.exists():
+        return False
+
+    destination = libs / lib_name
+
+    # In the vendored layout the bundled library already sits exactly where it
+    # is wanted, so source and destination are the same file and copy2 raises
+    # SameFileError. Nothing needs doing in that case.
+    if local_lib_path.resolve() == destination.resolve():
+        print(f"  library  {dep_id:<26} {lib_name} (bundled locally, already in place)")
         return True
-    return False
+
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(local_lib_path, destination)
+    print(f"  library  {dep_id:<26} {lib_name} (bundled locally)")
+    return True
 
 def extract_headers_from_github(dep: dict, includes: pathlib.Path) -> None:
     """Download <repo> at <ref> from GitHub and unpack it to includes/<id>/."""
@@ -240,8 +268,8 @@ def download_library(dep: dict, libs: pathlib.Path) -> None:
     url = dep.get("soLink")
     if not url:
         return
-    name = dep.get("overrideSoName") or url.rsplit("/", 1)[-1]
-    print(f"  library  {dep['id']:<26} {name}")
+    name = library_file_name(dep)
+    print(f"  library  {dep['id']:<26} {name} (GitHub)")
     (libs / name).write_bytes(fetch(url))
 
 
@@ -345,7 +373,7 @@ def main() -> int:
             download_library(dep, libs)
         except (urllib.error.URLError, urllib.error.HTTPError, RuntimeError, tarfile.TarError, OSError) as error:
             failures.append(f"{dep['id']}: {error}")
-            print(f"  FAILED   {dep['id']:<26} {error}", file=sys.stderr)
+            print(f"  FAILED   {dep['id']:<26} {error}", flush=True)
 
     if failures:
         print(f"\n{len(failures)} dependency/dependencies failed to restore.", file=sys.stderr)
