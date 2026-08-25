@@ -8,6 +8,16 @@ on:
   pull_request:
     branches: [ main, master ]
   workflow_dispatch:
+    inputs:
+      dependency_source:
+        description: 'Where to resolve dependencies from'
+        type: choice
+        required: false
+        default: auto
+        options:
+          - auto        # github manifest if complete, else qpackages.com
+          - github      # scripts/restore-deps.py only; fail if incomplete
+          - qpackages   # qpm restore only (qpackages.com)
 
 permissions:
   contents: write
@@ -22,18 +32,55 @@ jobs:
       with:
         submodules: true
 
+    # Two ways to get dependencies:
+    #   github     - scripts/restore-deps.py, resolving from github.com only
+    #   qpackages  - the classic `qpm restore` against qpackages.com
+    # "auto" (the default, and what push/PR runs get) prefers the github
+    # manifest and falls back to qpackages.com while that manifest is still
+    # missing repositories -- see scripts/README-deps.md.
+    - name: Choose dependency source
+      id: deps
+      run: |
+        requested="${{ github.event.inputs.dependency_source }}"
+        # push/PR runs carry no input; an explicit if avoids the `[ ... ] && x`
+        # exit-status trap, since Actions runs this step under `bash -e`.
+        if [ -z "$requested" ]; then requested=auto; fi
+
+        if [ "$requested" = "qpackages" ]; then
+          source=qpackages
+          reason="requested explicitly"
+        elif [ "$requested" = "github" ]; then
+          source=github
+          reason="requested explicitly"
+          # Asking for github explicitly must fail loudly on an incomplete
+          # manifest rather than quietly reaching for qpackages.com.
+          python3 scripts/restore-deps.py --check || exit 1
+        elif python3 scripts/restore-deps.py --check >/dev/null 2>&1; then
+          source=github
+          reason="manifest is complete"
+        else
+          source=qpackages
+          reason="scripts/dependencies.json is incomplete; run scripts/discover-deps.py to finish the migration"
+        fi
+
+        echo "source=$source" >> "$GITHUB_OUTPUT"
+        echo "use_qpm=$([ "$source" = qpackages ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+        echo "Dependency source: **$source** ($reason)" >> "$GITHUB_STEP_SUMMARY"
+        echo "Dependency source: $source ($reason)"
+
     - name: QPM Action
       id: qpm
       uses: Fernthedev/qpm-action@v1
       with:
         workflow_token: ${{ secrets.GITHUB_TOKEN }}
-        # Dependencies come from scripts/restore-deps.py (github.com only), not
-        # from qpackages.com. This step is kept purely for the Android NDK.
-        restore: false
+        # Only restores from qpackages.com when that source was selected;
+        # otherwise this step is here purely for the Android NDK.
+        restore: ${{ steps.deps.outputs.use_qpm }}
         cache: true
         resolve_ndk: true
 
-    - name: Restore dependencies (github.com only, no qpackages.com)
+    - name: Restore dependencies (github.com only)
+      if: steps.deps.outputs.source == 'github'
       run: python3 scripts/restore-deps.py
 
     - name: Build

@@ -301,6 +301,13 @@ qpackages.com, so `dependencies.json` currently leaves those `null` and
 repositories back into the manifest. Commit the result and the registry is out
 of the loop permanently.
 
+The build workflow takes a `dependency_source` input when run manually:
+`auto` (default — github manifest if complete, else `qpm restore`), `github`
+(github only, fails if the manifest is incomplete), or `qpackages` (classic
+`qpm restore`, qpackages.com only). Push and pull-request runs use `auto`, so
+CI keeps working while the manifest is unfinished and switches itself to
+github-only once it is done. The source used is printed in the run summary.
+
 See [`scripts/README-deps.md`](scripts/README-deps.md) for the details,
 including how to vendor `extern/` outright for a build that needs no network.
 
