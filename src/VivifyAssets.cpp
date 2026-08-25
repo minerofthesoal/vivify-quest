@@ -179,42 +179,105 @@ struct MaterialFallbackState {
   int renderQueue = -1;
 };
 
+// True for a colour that would leave the mesh looking blank.
+bool IsUninformativeColor(UnityEngine::Color const& color) {
+  bool const nearWhite = color.r > 0.97f && color.g > 0.97f && color.b > 0.97f;
+  bool const invisible = color.a <= 0.01f;
+  return nearWhite || invisible;
+}
+
+// Recovers the colour a material was actually tinted with.
+//
+// This used to return the first property that *existed*, which is almost always
+// `_Color` -- a property nearly every shader declares and nearly every material
+// leaves at its default of white. So the stand-in faithfully carried white
+// across and every converted asset came out flat white, even though the
+// material's real colour was sitting in `_BaseColor`, `_EmissionColor` or one of
+// the map's own named properties. Material property *values* are stored in the
+// SerializedFile and are entirely platform-independent, so that colour survives
+// conversion perfectly -- it was only ever being looked up wrong.
+//
+// Every candidate is now collected and the first informative one wins, falling
+// back to whatever was found if they are all blank.
 std::optional<UnityEngine::Color> ReadMaterialFallbackColor(UnityEngine::Material* material) {
   if (!IsManagedAlive(material)) return std::nullopt;
   static int const colorIds[] = {
-      UnityEngine::Shader::PropertyToID(u"_Color"),
       UnityEngine::Shader::PropertyToID(u"_BaseColor"),
-      UnityEngine::Shader::PropertyToID(u"_TintColor"),
       UnityEngine::Shader::PropertyToID(u"_MainColor"),
+      UnityEngine::Shader::PropertyToID(u"_TintColor"),
+      UnityEngine::Shader::PropertyToID(u"_Tint"),
+      UnityEngine::Shader::PropertyToID(u"_EmissionColor"),
+      UnityEngine::Shader::PropertyToID(u"_Emission"),
       UnityEngine::Shader::PropertyToID(u"_HorizonCol"),
       UnityEngine::Shader::PropertyToID(u"_SkyCol"),
-      UnityEngine::Shader::PropertyToID(u"_EmissionColor"),
+      UnityEngine::Shader::PropertyToID(u"_Color"),
   };
+
+  std::optional<UnityEngine::Color> firstFound;
+  auto consider = [&firstFound](UnityEngine::Color const& color) {
+    if (!firstFound.has_value()) firstFound = color;
+    return !IsUninformativeColor(color);
+  };
+
   for (int id : colorIds) {
-    if (material->HasProperty(id)) {
-      return material->GetColor(id);
+    if (!material->HasProperty(id)) continue;
+    auto color = material->GetColor(id);
+    if (consider(color)) return color;
+  }
+
+  // Then anything colour-shaped the material declares itself. Colours live in
+  // the Vector bucket -- MaterialPropertyType has no separate Color member.
+  auto names = material->GetPropertyNames(UnityEngine::MaterialPropertyType::Vector);
+  if (names) {
+    for (auto name : names) {
+      if (!name) continue;
+      std::string key = NormalizeAssetKey(ToStdString(name));
+      if (key.find("color") == std::string::npos && key.find("colour") == std::string::npos &&
+          key.find("col") == std::string::npos && key.find("tint") == std::string::npos &&
+          key.find("emis") == std::string::npos) {
+        continue;
+      }
+      auto color = material->GetColor(name);
+      if (consider(color)) return color;
     }
   }
-  auto names = material->GetPropertyNames(UnityEngine::MaterialPropertyType::Vector);
-  if (!names) return std::nullopt;
+  return firstFound;
+}
+
+// Recovers a texture to hand to the stand-in shader.
+//
+// Material.mainTexture only ever resolves `_MainTex`. Custom shaders routinely
+// name their albedo something else (`_BaseMap`, `_Albedo`, `_Tex`), so any
+// material not using the conventional name came through untextured.
+UnityEngine::Texture* ReadMaterialFallbackTexture(UnityEngine::Material* material) {
+  if (!IsManagedAlive(material)) return nullptr;
+  if (auto* mainTexture = material->get_mainTexture().unsafePtr(); IsManagedAlive(mainTexture)) {
+    return mainTexture;
+  }
+  auto names = material->GetPropertyNames(UnityEngine::MaterialPropertyType::Texture);
+  if (!names) return nullptr;
   for (auto name : names) {
     if (!name) continue;
     std::string key = NormalizeAssetKey(ToStdString(name));
-    if (key.find("color") == std::string::npos &&
-        key.find("colour") == std::string::npos &&
-        key.find("col") == std::string::npos) {
+    // Skip the maps that would look wrong as an albedo.
+    if (key.find("bump") != std::string::npos || key.find("normal") != std::string::npos ||
+        key.find("mask") != std::string::npos || key.find("metallic") != std::string::npos ||
+        key.find("occlusion") != std::string::npos || key.find("smoothness") != std::string::npos ||
+        key.find("height") != std::string::npos || key.find("detail") != std::string::npos) {
       continue;
     }
-    return material->GetColor(name);
+    if (auto* texture = material->GetTexture(name).unsafePtr(); IsManagedAlive(texture)) {
+      return texture;
+    }
   }
-  return std::nullopt;
+  return nullptr;
 }
 
 MaterialFallbackState CaptureMaterialFallbackState(UnityEngine::Material* material) {
   MaterialFallbackState state;
   if (!IsManagedAlive(material)) return state;
   state.color = ReadMaterialFallbackColor(material);
-  state.mainTexture = material->get_mainTexture().unsafePtr();
+  state.mainTexture = ReadMaterialFallbackTexture(material);
   state.renderQueue = material->get_renderQueue();
   return state;
 }
@@ -234,7 +297,17 @@ void RestoreMaterialFallbackState(UnityEngine::Material* material, MaterialFallb
     }
   }
   if (IsManagedAlive(state.mainTexture)) {
-    material->set_mainTexture(state.mainTexture);
+    // set_mainTexture only writes _MainTex; a stand-in using URP-style naming
+    // wants _BaseMap instead, so write whichever the shader actually declares.
+    static int const textureIds[] = {
+        UnityEngine::Shader::PropertyToID(u"_MainTex"),
+        UnityEngine::Shader::PropertyToID(u"_BaseMap"),
+    };
+    for (int id : textureIds) {
+      if (material->HasProperty(id)) {
+        material->SetTexture(id, state.mainTexture);
+      }
+    }
   }
   if (state.renderQueue >= 0) {
     material->set_renderQueue(state.renderQueue);

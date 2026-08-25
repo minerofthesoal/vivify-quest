@@ -185,6 +185,30 @@ repair silently gave up. Vivify now enumerates the shaders the process has
 actually loaded (`Resources.FindObjectsOfTypeAll<Shader>`), scores them, and
 caches the best stand-in; the chosen shader is logged.
 
+**Why converted assets came out white.** The stand-in was carrying the wrong
+colour across. `ReadMaterialFallbackColor` returned the first colour property
+that *existed* on the material — and that is nearly always `_Color`, a property
+almost every shader declares and almost every material leaves at its default of
+white. So it dutifully copied white while the material's real colour sat in
+`_BaseColor`, `_EmissionColor` or one of the map's own named properties.
+
+Material property *values* live in the SerializedFile and are entirely
+platform-independent, so those colours survive conversion perfectly — they were
+only ever being looked up wrong. Every candidate is now collected and the first
+*informative* one wins (skipping near-white and fully transparent), falling back
+to whatever was found if they are all blank.
+
+Texture recovery had the same shape of bug: it used `Material.mainTexture`,
+which only ever resolves `_MainTex`, so any shader naming its albedo `_BaseMap`
+or `_Albedo` came through untextured. It now scans the material's texture
+properties, skipping normal/mask/metallic-style maps that would look wrong as an
+albedo, and writes the result to whichever of `_MainTex`/`_BaseMap` the stand-in
+declares.
+
+Textures whose *pixel data* is BC/DXT-compressed still cannot be decoded by an
+Adreno GPU — that part is unfixable on device — but colour now comes through,
+which is the difference between a white mesh and a correctly tinted one.
+
 **Stand-ins can only carry so much.** A stand-in shader is a trade: "invisible"
 becomes "visible but wrong", and for a converted PC bundle "wrong" is often flat
 white, because the original material's look lives in a shader that cannot run.
