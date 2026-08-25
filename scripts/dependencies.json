@@ -58,6 +58,8 @@
     {
       "id": "conditional-dependencies",
       "version": "0.3.0",
+      "repo": "sc2ad/ConditionalDependencies",
+      "ref": "v0.2.0",
       "headersOnly": true,
       "cmake": false
     },
@@ -112,6 +114,8 @@
     {
       "id": "fmt",
       "version": "11.0.2",
+      "repo": "fmtlib/fmt",
+      "ref": "11.0.2",
       "headersOnly": true,
       "compileOptions": {
         "systemIncludes": [
