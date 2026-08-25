@@ -40,15 +40,26 @@ def extract_headers_from_local(dep: dict, includes: pathlib.Path) -> bool:
     """Check if headers are already bundled locally and copy them."""
     dep_id = dep["id"]
     local_include_dir = ROOT / "extern" / "includes" / dep_id
-    
-    if local_include_dir.exists():
-        destination = includes / dep_id
-        if destination.exists():
-            shutil.rmtree(destination)
-        shutil.copytree(local_include_dir, destination)
-        print(f"  headers  {dep_id:<26} (bundled locally)")
+
+    if not local_include_dir.exists():
+        return False
+
+    destination = includes / dep_id
+
+    # The vendored headers usually already live exactly where they are wanted
+    # (extern/includes/<id>), in which case source and destination are the same
+    # directory. Copying would mean rmtree'ing the destination first -- which
+    # is the source -- deleting the vendored tree and then failing on a copy
+    # from a path that no longer exists.
+    if local_include_dir.resolve() == destination.resolve():
+        print(f"  headers  {dep_id:<26} (bundled locally, already in place)")
         return True
-    return False
+
+    if destination.exists():
+        shutil.rmtree(destination)
+    shutil.copytree(local_include_dir, destination)
+    print(f"  headers  {dep_id:<26} (bundled locally)")
+    return True
 
 def extract_library_from_local(dep: dict, libs: pathlib.Path) -> bool:
     """Check if library is already bundled locally and copy it."""
@@ -193,20 +204,30 @@ def extract_headers_from_qpackages(dep: dict, includes: pathlib.Path) -> None:
         raise RuntimeError(f"Failed to extract archive for {dep_id}@{version}")
 
 
-def extract_headers(dep: dict, includes: pathlib.Path) -> None:
-    """Download headers from local bundle first, then GitHub, then qpackages.com."""
+def extract_headers(dep: dict, includes: pathlib.Path, allow_qpackages: bool = True) -> None:
+    """Download headers from local bundle first, then GitHub, then qpackages.com.
+
+    With allow_qpackages=False the qpackages.com fallback is refused outright,
+    so a dependency the manifest cannot source from GitHub fails the restore
+    instead of quietly reaching for the registry.
+    """
     # First try local bundled packages
     if extract_headers_from_local(dep, includes):
         return
-    
+
     # Then try GitHub if repo/ref specified
     if dep.get("repo") and dep.get("ref"):
         try:
             extract_headers_from_github(dep, includes)
             return
         except (urllib.error.URLError, urllib.error.HTTPError) as e:
+            if not allow_qpackages:
+                raise RuntimeError(f"GitHub source failed and --no-qpackages is set: {e}") from e
             print(f"  WARNING  {dep['id']:<26} GitHub failed: {e}, trying qpackages.com")
-    
+
+    if not allow_qpackages:
+        raise RuntimeError("no GitHub repo/ref in the manifest and --no-qpackages is set")
+
     # Fall back to qpackages.com
     extract_headers_from_qpackages(dep, includes)
 
@@ -260,6 +281,8 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--clean", action="store_true", help="remove extern/ before restoring")
     parser.add_argument("--check", action="store_true", help="validate the manifest without downloading")
+    parser.add_argument("--no-qpackages", action="store_true",
+                        help="refuse the qpackages.com fallback; fail if a dependency is not on GitHub")
     args = parser.parse_args()
 
     manifest = json.loads(MANIFEST.read_text())
@@ -268,14 +291,44 @@ def main() -> int:
     # Now we allow dependencies without repo/ref - they will be fetched from qpackages.com
     # No need to error out anymore for missing repo/ref
 
+    needs_registry = [d["id"] for d in dependencies if not (d.get("repo") and d.get("ref"))]
+
+    # A ref carrying none of the pinned version's digits usually means the entry
+    # points at an upstream project rather than the qpm-packaged fork of it --
+    # the mistake that put fmtlib/fmt, sc2ad/ConditionalDependencies and
+    # z4kn4fein/cpp-semver in this manifest, none of which has the ref
+    # qpm.shared.json pins. Restoring the wrong package fails far more
+    # confusingly than saying so up front.
+    suspicious = []
+    for dep in dependencies:
+        if not dep.get("repo"):
+            continue
+        digits = str(dep.get("version", "")).replace(".", "")
+        ref_digits = "".join(c for c in str(dep.get("ref", "")) if c.isdigit())
+        if digits and ref_digits and digits not in ref_digits:
+            suspicious.append(f"{dep['id']}: version {dep['version']} but ref {dep['ref']}")
+
+    for warning in suspicious:
+        print(f"warning: {warning}", file=sys.stderr)
+
     if args.check:
-        print(f"Manifest OK: {len(dependencies)} dependencies.")
-        github_deps = sum(1 for d in dependencies if d.get("repo") and d.get("ref"))
-        qpackages_deps = len(dependencies) - github_deps
+        github_deps = len(dependencies) - len(needs_registry)
+        print(f"Manifest: {len(dependencies)} dependencies.")
         print(f"  GitHub sources: {github_deps}")
-        print(f"  qpackages.com fallback: {qpackages_deps}")
+        print(f"  qpackages.com fallback: {len(needs_registry)}")
         print(f"Native libraries: {sum(1 for d in dependencies if d.get('soLink'))}")
+        if args.no_qpackages and needs_registry:
+            print("\nerror: --no-qpackages, but these have no GitHub repo/ref:", file=sys.stderr)
+            for dep_id in needs_registry:
+                print(f"  - {dep_id}", file=sys.stderr)
+            print("\nRun scripts/discover-deps.py to complete the manifest.", file=sys.stderr)
+            return 1
         return 0
+
+    if args.no_qpackages and needs_registry:
+        print("error: --no-qpackages, but these have no GitHub repo/ref: "
+              + ", ".join(needs_registry), file=sys.stderr)
+        return 1
 
     extern = ROOT / manifest.get("externDir", "extern")
     if args.clean and extern.exists():
@@ -288,7 +341,7 @@ def main() -> int:
     failures = []
     for dep in dependencies:
         try:
-            extract_headers(dep, includes)
+            extract_headers(dep, includes, allow_qpackages=not args.no_qpackages)
             download_library(dep, libs)
         except (urllib.error.URLError, urllib.error.HTTPError, RuntimeError, tarfile.TarError, OSError) as error:
             failures.append(f"{dep['id']}: {error}")

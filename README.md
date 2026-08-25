@@ -185,6 +185,57 @@ repair silently gave up. Vivify now enumerates the shaders the process has
 actually loaded (`Resources.FindObjectsOfTypeAll<Shader>`), scores them, and
 caches the best stand-in; the chosen shader is logged.
 
+**Why converted assets came out white.** The stand-in was carrying the wrong
+colour across. `ReadMaterialFallbackColor` returned the first colour property
+that *existed* on the material — and that is nearly always `_Color`, a property
+almost every shader declares and almost every material leaves at its default of
+white. So it dutifully copied white while the material's real colour sat in
+`_BaseColor`, `_EmissionColor` or one of the map's own named properties.
+
+Material property *values* live in the SerializedFile and are entirely
+platform-independent, so those colours survive conversion perfectly — they were
+only ever being looked up wrong. Every candidate is now collected and the first
+*informative* one wins (skipping near-white and fully transparent), falling back
+to whatever was found if they are all blank.
+
+Texture recovery had the same shape of bug: it used `Material.mainTexture`,
+which only ever resolves `_MainTex`, so any shader naming its albedo `_BaseMap`
+or `_Albedo` came through untextured. It now scans the material's texture
+properties, skipping normal/mask/metallic-style maps that would look wrong as an
+albedo, and writes the result to whichever of `_MainTex`/`_BaseMap` the stand-in
+declares.
+
+**Textures are decoded on the CPU.** Quest's Adreno GPUs support ETC2 and ASTC
+but not S3TC/BC, and a PC-built AssetBundle stores its textures as BC1/BC3/BC7.
+Unity hands back the `Texture2D` quite happily; nothing can sample it. Vivify
+now decodes those blocks to RGBA32 on load, using the vendored
+[`bcdec.h`](include/third_party/) (single header, no includes of its own,
+MIT/public-domain), and swaps the decoded copy into every material that
+referenced the original. It costs memory — BC1 is 4 bits per pixel, RGBA32 is
+32 — but it is the difference between an untextured mesh and a textured one.
+
+This needs the source texture's raw bytes to still be around. A texture
+imported without read/write enabled may have had its CPU copy dropped after
+upload, and there is then nothing to decode; that case is logged per texture
+and the original is left alone rather than guessed at.
+
+`src/VivifyTextureDecode.cpp` has no Unity dependency and is covered by a host
+test suite (`tools/texturedecode/`) that decodes hand-built BC1/BC3 blocks and
+checks the resulting pixels, including non-multiple-of-four sizes, full mip
+chains and every refusal path — run in CI under ASan/UBSan.
+
+**Stand-ins can only carry so much.** A stand-in shader is a trade: "invisible"
+becomes "visible but wrong", and for a converted PC bundle "wrong" is often flat
+white, because the original material's look lives in a shader that cannot run.
+Two things limit the damage. The stand-in is chosen preferring shaders that
+expose `_MainTex` and a colour, so whatever the original material carried is
+transferred. And when neither a colour nor a texture can be recovered, the
+substitution is declined outright — an arbitrary flat white shape over the
+scene is worse than the object not drawing, and for notes and sabers declining
+means the game's own visuals stay. The **Stand-In Shading For Unsupported
+Shaders** setting (on by default) turns the whole mechanism off if you would
+rather have converted maps render nothing than render white.
+
 **Belt and braces.** A replacement prefab now only hides the note, saber or
 debris it stands in for once at least one of its spawned renderers has a
 material whose shader this GPU can run. If a bundle's shading cannot be
@@ -300,6 +351,12 @@ qpackages.com, so `dependencies.json` currently leaves those `null` and
 `qpm restore` produced — it reads each package's own `qpm.json` and writes the
 repositories back into the manifest. Commit the result and the registry is out
 of the loop permanently.
+
+The build workflow takes a `dependency_source` input when run manually:
+`auto` (default — GitHub where the manifest allows, qpackages.com for the
+remainder), `github` (GitHub only; fails rather than touching the registry),
+or `qpackages` (`qpm restore` only). Push and pull-request runs use `auto`.
+The source used is printed in the run summary.
 
 See [`scripts/README-deps.md`](scripts/README-deps.md) for the details,
 including how to vendor `extern/` outright for a build that needs no network.

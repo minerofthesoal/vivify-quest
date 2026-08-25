@@ -24,6 +24,26 @@ downloading anything.
 effect to the one qpm produces — the include directories and compile flags are
 verified to match exactly. Don't hand-edit it.
 
+## Choosing the source in CI
+
+The build workflow takes a `dependency_source` input when run manually
+(Actions -> Build Quest Mod -> Run workflow):
+
+| Value | Behaviour |
+| --- | --- |
+| `auto` (default) | `restore-deps.py` — GitHub for every dependency the manifest can source that way, qpackages.com for the remainder. What push and pull-request runs get. |
+| `github` | `restore-deps.py --no-qpackages` — GitHub only. Fails the build rather than touching the registry, so it only succeeds once the manifest is complete. |
+| `qpackages` | `qpm restore` only. Nothing is fetched from GitHub. |
+
+The chosen source and the reason for it go to the log and the run summary, so
+it is always visible which one a build used.
+
+`--no-qpackages` works on the command line too, including with `--check`:
+
+```sh
+python3 scripts/restore-deps.py --check --no-qpackages   # is GitHub-only viable yet?
+```
+
 ## Finishing the manifest (one time)
 
 Most dependencies publish their native library as a GitHub release asset, so

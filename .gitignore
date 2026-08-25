@@ -1,44 +1,50 @@
-```
-# Build artifacts and compressed files
-*.zip
-types.json.zip
+# Dependencies
+# extern/includes/ is deliberately vendored (see scripts/README-deps.md), so it
+# is tracked rather than ignored. Only the restore scratch is excluded.
+.qpm/
 
-# Dependencies and external libraries
-extern/includes/
+# Build and temp directories
+build/
+temp_qmod/
+dist/
+target/
 
-# Logs and temporary files
-*.log
-*.tmp
-
-# Environment files
-.env
-.env.local
-*.env.*
-
-# Editors and IDEs
+# Private / user settings
+ndkpath.txt
+qpm.private.json
+CMakeUserPresets.json
 .vscode/
 .idea/
 
-# System files
-.DS_Store
-Thumbs.db
+# Compiled outputs
+*.qmod
+*.so
+# ...but the vendored native libraries are tracked on purpose.
+!extern/libs/*.so
+*.dll
+*.exe
+*.o
+*.obj
+
+# Logs and temp files
+*.log
+*.tmp
+
+# Environment
+.env
+.env.local
+*.env
+*.env.*
+
+# Converter test scratch
+tools/bundleconvert/work/
+__pycache__/
+*.pyc
 
 # Coverage and testing
 coverage/
 htmlcov/
 
-# Compressed archives
-*.gz
-*.tar
-*.gz
-*.bz2
-*.xz
-*.7z
-*.rar
-*.Z
-*.lz
-*.lzo
-*.tar.gz
-*.tar.bz2
-*.tar.xz
-```
+# System files
+.DS_Store
+Thumbs.db

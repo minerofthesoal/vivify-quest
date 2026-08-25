@@ -1,6 +1,9 @@
 #include "VivifyRuntimeInternal.hpp"
 #include "VivifyComponents.hpp"
 #include "VivifyBundleConvert.hpp"
+#include "VivifyTextureDecode.hpp"
+#include "UnityEngine/Texture2D.hpp"
+#include "UnityEngine/TextureFormat.hpp"
 #include <atomic>
 #include <cstdio>
 #include <cstring>
@@ -179,42 +182,105 @@ struct MaterialFallbackState {
   int renderQueue = -1;
 };
 
+// True for a colour that would leave the mesh looking blank.
+bool IsUninformativeColor(UnityEngine::Color const& color) {
+  bool const nearWhite = color.r > 0.97f && color.g > 0.97f && color.b > 0.97f;
+  bool const invisible = color.a <= 0.01f;
+  return nearWhite || invisible;
+}
+
+// Recovers the colour a material was actually tinted with.
+//
+// This used to return the first property that *existed*, which is almost always
+// `_Color` -- a property nearly every shader declares and nearly every material
+// leaves at its default of white. So the stand-in faithfully carried white
+// across and every converted asset came out flat white, even though the
+// material's real colour was sitting in `_BaseColor`, `_EmissionColor` or one of
+// the map's own named properties. Material property *values* are stored in the
+// SerializedFile and are entirely platform-independent, so that colour survives
+// conversion perfectly -- it was only ever being looked up wrong.
+//
+// Every candidate is now collected and the first informative one wins, falling
+// back to whatever was found if they are all blank.
 std::optional<UnityEngine::Color> ReadMaterialFallbackColor(UnityEngine::Material* material) {
   if (!IsManagedAlive(material)) return std::nullopt;
   static int const colorIds[] = {
-      UnityEngine::Shader::PropertyToID(u"_Color"),
       UnityEngine::Shader::PropertyToID(u"_BaseColor"),
-      UnityEngine::Shader::PropertyToID(u"_TintColor"),
       UnityEngine::Shader::PropertyToID(u"_MainColor"),
+      UnityEngine::Shader::PropertyToID(u"_TintColor"),
+      UnityEngine::Shader::PropertyToID(u"_Tint"),
+      UnityEngine::Shader::PropertyToID(u"_EmissionColor"),
+      UnityEngine::Shader::PropertyToID(u"_Emission"),
       UnityEngine::Shader::PropertyToID(u"_HorizonCol"),
       UnityEngine::Shader::PropertyToID(u"_SkyCol"),
-      UnityEngine::Shader::PropertyToID(u"_EmissionColor"),
+      UnityEngine::Shader::PropertyToID(u"_Color"),
   };
+
+  std::optional<UnityEngine::Color> firstFound;
+  auto consider = [&firstFound](UnityEngine::Color const& color) {
+    if (!firstFound.has_value()) firstFound = color;
+    return !IsUninformativeColor(color);
+  };
+
   for (int id : colorIds) {
-    if (material->HasProperty(id)) {
-      return material->GetColor(id);
+    if (!material->HasProperty(id)) continue;
+    auto color = material->GetColor(id);
+    if (consider(color)) return color;
+  }
+
+  // Then anything colour-shaped the material declares itself. Colours live in
+  // the Vector bucket -- MaterialPropertyType has no separate Color member.
+  auto names = material->GetPropertyNames(UnityEngine::MaterialPropertyType::Vector);
+  if (names) {
+    for (auto name : names) {
+      if (!name) continue;
+      std::string key = NormalizeAssetKey(ToStdString(name));
+      if (key.find("color") == std::string::npos && key.find("colour") == std::string::npos &&
+          key.find("col") == std::string::npos && key.find("tint") == std::string::npos &&
+          key.find("emis") == std::string::npos) {
+        continue;
+      }
+      auto color = material->GetColor(name);
+      if (consider(color)) return color;
     }
   }
-  auto names = material->GetPropertyNames(UnityEngine::MaterialPropertyType::Vector);
-  if (!names) return std::nullopt;
+  return firstFound;
+}
+
+// Recovers a texture to hand to the stand-in shader.
+//
+// Material.mainTexture only ever resolves `_MainTex`. Custom shaders routinely
+// name their albedo something else (`_BaseMap`, `_Albedo`, `_Tex`), so any
+// material not using the conventional name came through untextured.
+UnityEngine::Texture* ReadMaterialFallbackTexture(UnityEngine::Material* material) {
+  if (!IsManagedAlive(material)) return nullptr;
+  if (auto* mainTexture = material->get_mainTexture().unsafePtr(); IsManagedAlive(mainTexture)) {
+    return mainTexture;
+  }
+  auto names = material->GetPropertyNames(UnityEngine::MaterialPropertyType::Texture);
+  if (!names) return nullptr;
   for (auto name : names) {
     if (!name) continue;
     std::string key = NormalizeAssetKey(ToStdString(name));
-    if (key.find("color") == std::string::npos &&
-        key.find("colour") == std::string::npos &&
-        key.find("col") == std::string::npos) {
+    // Skip the maps that would look wrong as an albedo.
+    if (key.find("bump") != std::string::npos || key.find("normal") != std::string::npos ||
+        key.find("mask") != std::string::npos || key.find("metallic") != std::string::npos ||
+        key.find("occlusion") != std::string::npos || key.find("smoothness") != std::string::npos ||
+        key.find("height") != std::string::npos || key.find("detail") != std::string::npos) {
       continue;
     }
-    return material->GetColor(name);
+    if (auto* texture = material->GetTexture(name).unsafePtr(); IsManagedAlive(texture)) {
+      return texture;
+    }
   }
-  return std::nullopt;
+  return nullptr;
 }
 
 MaterialFallbackState CaptureMaterialFallbackState(UnityEngine::Material* material) {
   MaterialFallbackState state;
   if (!IsManagedAlive(material)) return state;
   state.color = ReadMaterialFallbackColor(material);
-  state.mainTexture = material->get_mainTexture().unsafePtr();
+  state.mainTexture = ReadMaterialFallbackTexture(material);
   state.renderQueue = material->get_renderQueue();
   return state;
 }
@@ -234,7 +300,17 @@ void RestoreMaterialFallbackState(UnityEngine::Material* material, MaterialFallb
     }
   }
   if (IsManagedAlive(state.mainTexture)) {
-    material->set_mainTexture(state.mainTexture);
+    // set_mainTexture only writes _MainTex; a stand-in using URP-style naming
+    // wants _BaseMap instead, so write whichever the shader actually declares.
+    static int const textureIds[] = {
+        UnityEngine::Shader::PropertyToID(u"_MainTex"),
+        UnityEngine::Shader::PropertyToID(u"_BaseMap"),
+    };
+    for (int id : textureIds) {
+      if (material->HasProperty(id)) {
+        material->SetTexture(id, state.mainTexture);
+      }
+    }
   }
   if (state.renderQueue >= 0) {
     material->set_renderQueue(state.renderQueue);
@@ -635,6 +711,7 @@ void Runtime::LoadMainBundle() {
       PaperLogger.info("Vivify bundle preloaded, rebuilding asset caches: '{}'", bundlePath);
     }
     CacheBundleAssets();
+    DecodeUnsupportedBundleTextures();
     RepairLoadedMaterialShaders();
     return;
   }
@@ -650,6 +727,7 @@ void Runtime::LoadMainBundle() {
   }
   _preloadedBundlePath = bundlePath;
   CacheBundleAssets();
+  DecodeUnsupportedBundleTextures();
   RepairLoadedMaterialShaders();
 }
 
@@ -802,6 +880,18 @@ UnityEngine::Shader* Runtime::FindFallbackShader() {
       std::transform(lowerName.begin(), lowerName.end(), lowerName.begin(),
                      [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
       int const score = scoreShader(lowerName);
+        int score = scoreShader(lowerName);
+      // A stand-in is only useful if the original material's look can be
+      // carried across. One that exposes neither _MainTex nor a colour renders
+      // everything flat white, which is what made converted maps come up
+      // partially or fully white.
+      if (score > 0) {
+        if (candidate->FindPropertyIndex(StringW("_MainTex")) >= 0) score += 50;
+        if (candidate->FindPropertyIndex(StringW("_Color")) >= 0 ||
+            candidate->FindPropertyIndex(StringW("_BaseColor")) >= 0) {
+          score += 50;
+        }
+      }
       if (score <= bestScore) continue;
       bestScore = score;
       _fallbackShader = candidate;
@@ -862,6 +952,26 @@ void Runtime::RepairMaterialShader(UnityEngine::Material* material, std::string_
   if (!IsAlive(replacement)) {
     replacement = FindFallbackShader();
   }
+  // Substituting a stand-in trades "invisible" for "visible but wrong". That is
+  // only a good trade when something of the original look survives: if neither
+  // a colour nor a texture could be recovered, the stand-in paints an arbitrary
+  // flat white shape over the scene, which for a large or full-screen mesh is
+  // considerably worse than the object simply not drawing. Leave the dead
+  // shader in place instead -- for notes and sabers ReplacementCanRender then
+  // keeps the game's own visuals, which look right.
+  bool const canCarryLook = fallbackState.color.has_value() || IsManagedAlive(fallbackState.mainTexture);
+  bool const declineStandIn = IsAlive(replacement) && replacement == _fallbackShader &&
+                              (!canCarryLook || !GetStandInShading());
+  if (declineStandIn) {
+    _shaderRepairFailed++;
+    PaperLogger.warn("Vivify shader stand-in declined: material '{}' (shader '{}') -- {}",
+                     ToStdString(material->get_name()), originalShaderName,
+                     !GetStandInShading() ? "stand-in shading is turned off in settings"
+                                          : "no colour or texture to carry over, so it would render flat white");
+    _repairedMaterials.emplace(material);
+    return;
+  }
+
   if (IsAlive(replacement)) {
     material->set_shader(replacement);
     RestoreMaterialFallbackState(material, fallbackState);
@@ -940,6 +1050,116 @@ void Runtime::RefreshLoadedMaterialStereoKeywords() {
     } else if (auto* gameObject = il2cpp_utils::try_cast<UnityEngine::GameObject>(asset).value_or(nullptr); IsAlive(gameObject)) {
       ApplyGameObjectStereoKeywords(gameObject);
     }
+  }
+}
+
+
+// Decodes a block-compressed texture this GPU cannot sample into RGBA32.
+//
+// Quest's Adreno GPUs support ETC2 and ASTC but not S3TC/BC, and a PC-built
+// AssetBundle stores its textures as BC1/BC3/BC7. Unity will happily hand back
+// the Texture2D object, but nothing can sample it -- which is why converted
+// maps came through untextured even once their materials carried the right
+// colour. Decoding on the CPU costs memory (BC1 is 4 bits per pixel, RGBA32 is
+// 32) but produces something that actually renders.
+//
+// Requires the source texture's raw bytes to still be available; a texture
+// imported without read/write enabled may have had its CPU copy dropped, in
+// which case there is nothing to decode and the original is returned unchanged.
+UnityEngine::Texture* Runtime::ResolveUsableTexture(UnityEngine::Texture* texture) {
+  if (!IsAlive(texture)) return texture;
+  if (auto cached = _decodedTextures.find(texture); cached != _decodedTextures.end()) {
+    return IsAlive(cached->second) ? cached->second : texture;
+  }
+
+  auto* source = il2cpp_utils::try_cast<UnityEngine::Texture2D>(texture).value_or(nullptr);
+  if (!IsAlive(source)) return texture;
+
+  int const unityFormat = source->get_format().value__;
+  if (UnityEngine::SystemInfo::SupportsTextureFormat(source->get_format())) {
+    _decodedTextures[texture] = nullptr;
+    return texture;
+  }
+
+  auto const format = TextureDecode::FromUnityTextureFormat(unityFormat);
+  std::string const name = ToStdString(source->get_name());
+  if (format == TextureDecode::Format::Unsupported) {
+    PaperLogger.warn("Vivify texture '{}': format {} is unsupported here and cannot be decoded", name, unityFormat);
+    _decodedTextures[texture] = nullptr;
+    return texture;
+  }
+
+  int const width = source->get_width();
+  int const height = source->get_height();
+  int const mipCount = std::max(1, source->get_mipmapCount());
+
+  ArrayW<uint8_t, Array<uint8_t>*> raw = nullptr;
+  try {
+    raw = source->GetRawTextureData();
+  } catch (...) {
+    raw = nullptr;
+  }
+  if (!raw || raw.size() == 0) {
+    PaperLogger.warn("Vivify texture '{}' ({}, {}x{}): no raw data available to decode -- the texture was "
+                     "imported without read/write enabled, so its CPU copy is gone",
+                     name, TextureDecode::FormatName(format), width, height);
+    _decodedTextures[texture] = nullptr;
+    return texture;
+  }
+
+  std::vector<uint8_t> decoded;
+  if (!TextureDecode::DecodeToRgba32(format, raw.begin(), static_cast<size_t>(raw.size()), width, height, mipCount,
+                                     decoded)) {
+    PaperLogger.warn("Vivify texture '{}' ({}, {}x{}, {} mip(s)): {} byte(s) of data did not decode",
+                     name, TextureDecode::FormatName(format), width, height, mipCount, raw.size());
+    _decodedTextures[texture] = nullptr;
+    return texture;
+  }
+
+  auto* replacement = UnityEngine::Texture2D::New_ctor(width, height, UnityEngine::TextureFormat::RGBA32,
+                                                       mipCount, false);
+  if (!IsAlive(replacement)) {
+    _decodedTextures[texture] = nullptr;
+    return texture;
+  }
+  auto managed = ArrayW<uint8_t, Array<uint8_t>*>(static_cast<il2cpp_array_size_t>(decoded.size()));
+  std::memcpy(managed.begin(), decoded.data(), decoded.size());
+  replacement->LoadRawTextureData(managed);
+  replacement->Apply();
+  replacement->set_wrapMode(source->get_wrapMode());
+  replacement->set_filterMode(source->get_filterMode());
+  replacement->set_name(StringW(name + " (decoded)"));
+
+  PaperLogger.info("Vivify texture decoded: '{}' {} {}x{} ({} mip(s)) -> RGBA32", name,
+                   TextureDecode::FormatName(format), width, height, mipCount);
+  _decodedTextures[texture] = replacement;
+  return replacement;
+}
+
+// Walks every material in the bundle and swaps any texture this GPU cannot
+// sample for a decoded copy. Runs once per bundle load, before shader repair,
+// so a material that keeps its own working shader still gets usable textures.
+void Runtime::DecodeUnsupportedBundleTextures() {
+  int swapped = 0;
+  for (auto const& [path, asset] : _assets) {
+    auto* material = il2cpp_utils::try_cast<UnityEngine::Material>(asset).value_or(nullptr);
+    if (!IsAlive(material)) continue;
+    auto names = material->GetPropertyNames(UnityEngine::MaterialPropertyType::Texture);
+    if (!names) continue;
+    for (auto name : names) {
+      if (!name) continue;
+      auto* current = material->GetTexture(name).unsafePtr();
+      if (!IsAlive(current)) continue;
+      auto* usable = ResolveUsableTexture(current);
+      if (IsAlive(usable) && usable != current) {
+        material->SetTexture(name, usable);
+        swapped++;
+      }
+    }
+  }
+  if (swapped > 0) {
+    PaperLogger.info("Vivify texture decode: replaced {} unsupported texture reference(s) across bundle materials",
+                     swapped);
   }
 }
 

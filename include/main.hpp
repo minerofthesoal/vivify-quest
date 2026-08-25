@@ -16,6 +16,7 @@ bool GetDisableCustomNoteVisuals();
 bool GetDisableVisualsInMultiplayer();
 bool GetDisableVRCenterAdjust();
 bool GetConvertPcBundlesOnDevice();
+bool GetStandInShading();
 void EnsureConfigDefaults();
 constexpr auto PaperLogger = Paper::ConstLoggerContext("Vivify");
 

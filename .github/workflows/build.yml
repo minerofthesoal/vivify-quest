@@ -13,11 +13,20 @@ on:
         description: 'Override version number (optional, defaults to mod.json version)'
         required: false
         default: ''
-      use_qpackages:
-        description: 'Use qpackages.com along with github.com for dependencies'
-        required: false
-        default: 'false'
+      release:
+        description: 'Publish a GitHub release for this build'
         type: boolean
+        required: false
+        default: false
+      dependency_source:
+        description: 'Where to resolve dependencies from'
+        type: choice
+        required: false
+        default: auto
+        options:
+          - auto        # github manifest if complete, else qpackages.com
+          - github      # scripts/restore-deps.py only; fail if incomplete
+          - qpackages   # qpm restore only (qpackages.com)
 
 permissions:
   contents: write
@@ -32,29 +41,59 @@ jobs:
       with:
         submodules: true
 
+    # Three ways to get dependencies:
+    #   auto       scripts/restore-deps.py -- GitHub where the manifest has a
+    #              repo, qpackages.com for the rest (default; push/PR runs)
+    #   github     scripts/restore-deps.py --no-qpackages -- GitHub only, and
+    #              fails rather than touching the registry
+    #   qpackages  `qpm restore` only
+    # See scripts/README-deps.md.
+    - name: Choose dependency source
+      id: deps
+      run: |
+        requested="${{ github.event.inputs.dependency_source }}"
+        # push/PR runs carry no input; an explicit if avoids the `[ ... ] && x`
+        # exit-status trap, since Actions runs this step under `bash -e`.
+        if [ -z "$requested" ]; then requested=auto; fi
+
+        case "$requested" in
+          qpackages)
+            source=qpackages
+            reason="requested explicitly" ;;
+          github)
+            source=github
+            reason="requested explicitly"
+            # Must fail loudly on a manifest that still needs the registry.
+            python3 scripts/restore-deps.py --check --no-qpackages || exit 1 ;;
+          *)
+            source=auto
+            reason="GitHub where available, qpackages.com for the remainder"
+            python3 scripts/restore-deps.py --check || exit 1 ;;
+        esac
+
+        echo "source=$source" >> "$GITHUB_OUTPUT"
+        echo "use_qpm=$([ "$source" = qpackages ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+        echo "Dependency source: **$source** ($reason)" >> "$GITHUB_STEP_SUMMARY"
+        echo "Dependency source: $source ($reason)"
+
     - name: QPM Action
       id: qpm
       uses: Fernthedev/qpm-action@v1
       with:
         workflow_token: ${{ secrets.GITHUB_TOKEN }}
-        # By default, restore is false (github.com only via restore-deps.py).
-        # If use_qpackages is enabled, let qpm restore dependencies from qpackages.com
-        # in addition to github.com sources.
-        restore: ${{ github.event.inputs.use_qpackages == 'true' }}
+        # Only restores from qpackages.com when that source was selected;
+        # otherwise this step is here purely for the Android NDK.
+        restore: ${{ steps.deps.outputs.use_qpm }}
         cache: true
         resolve_ndk: true
 
-    - name: Restore dependencies (github.com only, no qpackages.com)
-      if: github.event.inputs.use_qpackages != 'true'
-      run: python3 scripts/restore-deps.py
+    - name: Restore dependencies (GitHub only)
+      if: steps.deps.outputs.source == 'github'
+      run: python3 scripts/restore-deps.py --no-qpackages
 
-    - name: Restore dependencies (github.com + qpackages.com)
-      if: github.event.inputs.use_qpackages == 'true'
-      run: |
-        # First restore from github.com using our manifest
-        python3 scripts/restore-deps.py
-        # Then let qpm restore any additional/missing packages from qpackages.com
-        qpm restore
+    - name: Restore dependencies (GitHub, qpackages.com for the remainder)
+      if: steps.deps.outputs.source == 'auto'
+      run: python3 scripts/restore-deps.py
 
     - name: Build
       run: qpm s build
@@ -74,9 +113,13 @@ jobs:
 
     - name: Rename QMOD artifact
       run: |
-        for f in ./*.qmod; do
-          mv "$f" "./Vivify-v${{ steps.mod_version.outputs.version }}.qmod"
-        done
+        shopt -s nullglob
+        built=(./*.qmod)
+        if [ ${#built[@]} -eq 0 ]; then
+          echo "::error::qpm s qmod produced no .qmod file"
+          exit 1
+        fi
+        mv "${built[0]}" "./Vivify-v${{ steps.mod_version.outputs.version }}.qmod"
 
     - name: Upload Artifact
       uses: actions/upload-artifact@v4
@@ -85,10 +128,18 @@ jobs:
         path: ./*.qmod
         if-no-files-found: error
 
+    # Fires on a v* tag push, and on a manual run with `release` ticked.
+    # Without the second case a workflow_dispatch build could only ever produce
+    # an artifact, never a release.
     - name: Publish Release
-      if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+      if: >-
+        (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) ||
+        github.event.inputs.release == 'true'
       uses: softprops/action-gh-release@v2
       with:
+        # A tag push releases under the tag that was pushed; a manual run tags
+        # from the version, creating the tag if it does not exist yet.
+        tag_name: ${{ (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) && github.ref_name || format('v{0}', steps.mod_version.outputs.version) }}
         name: Vivify ${{ steps.mod_version.outputs.version }}
         generate_release_notes: true
         body: |
@@ -96,5 +147,6 @@ jobs:
           rbatteries1-design/Vivify-Quest-Port, and Lars27110/Vivify-Quest —
           see README for what was merged from each).
 
-          Built automatically from tag `${{ github.ref_name }}`.
-        files: ./*.qmod
+          Built from `${{ github.ref_name }}` (dependency source:
+          ${{ steps.deps.outputs.source }}).
+        files: ./Vivify-v${{ steps.mod_version.outputs.version }}.qmod

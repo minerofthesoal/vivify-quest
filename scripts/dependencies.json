@@ -57,11 +57,12 @@
     },
     {
       "id": "conditional-dependencies",
-      "version": "0.2.0",
-      "repo": "sc2ad/ConditionalDependencies",
-      "ref": "v0.2.0",
+      "version": "0.3.0",
+      "repo": null,
+      "ref": "version/v0_3_0",
       "headersOnly": true,
-      "cmake": false
+      "cmake": false,
+      "_note": "upstream project was NOT the qpm package: it has no 'version/v0_3_0' ref. Needs the qpm-packaged fork; run scripts/discover-deps.py."
     },
     {
       "id": "config-utils",
@@ -75,9 +76,10 @@
     {
       "id": "cpp-semver",
       "version": "0.1.2",
-      "repo": "z4kn4fein/cpp-semver",
-      "ref": "v0.1.0",
-      "headersOnly": true
+      "repo": null,
+      "ref": "version-v0.1.2",
+      "headersOnly": true,
+      "_note": "upstream project was NOT the qpm package: it has no 'version-v0.1.2' ref. Needs the qpm-packaged fork; run scripts/discover-deps.py."
     },
     {
       "id": "custom-json-data",
@@ -114,8 +116,8 @@
     {
       "id": "fmt",
       "version": "11.0.2",
-      "repo": "fmtlib/fmt",
-      "ref": "11.0.2",
+      "repo": null,
+      "ref": "version/v11_0_2",
       "headersOnly": true,
       "compileOptions": {
         "systemIncludes": [
@@ -124,7 +126,8 @@
         "cppFlags": [
           "-DFMT_HEADER_ONLY"
         ]
-      }
+      },
+      "_note": "upstream project was NOT the qpm package: it has no 'version/v11_0_2' ref. Needs the qpm-packaged fork; run scripts/discover-deps.py."
     },
     {
       "id": "libil2cpp",
