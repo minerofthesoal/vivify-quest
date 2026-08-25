@@ -1,34 +1,55 @@
-```
-# Build artifacts and compiled files
-*.hpp
-*.cpp
+# Dependencies
+node_modules/
+.venv/
+venv/
+__pycache__/
+.mypy_cache/
+.pytest_cache/
+.julia/
+zig*/
+target/
+.gradle/
+
+# Build artifacts
+dist/
+build/
+*.pyc
+*.class
 *.o
-*.obj
+*.exe
+*.dll
 *.so
 *.a
-*.lib
-*.dll
-*.exe
+*.obj
 *.out
 
-# Dependency directories
-extern/includes/
-extern/libs/
+# Environment
+.env
+.env.local
+*.env.*
 
-# IDE and editor files
+# Editors
 .vscode/
 .idea/
 *.swp
 *.swo
+
+# System
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Coverage
+coverage/
+htmlcov/
+.coverage
+
+# Temp files
 *.tmp
 
-# System and environment files
-*.log
-*.env
-*.env.local
-.env.*
-
-# Compressed archives
+# Compressed files
 *.zip
 *.gz
 *.tar
@@ -51,19 +72,3 @@ extern/libs/
 *.tar.bz2
 *.tar.xz
 *.tar.zst
-
-# Unity/C# specific
-*.meta
-*.pidb
-*.sln
-*.csproj
-*.userprefs
-*.user
-*.unitypackage
-
-# BS-Cordl specific
-extern/includes/bs-cordl/
-
-# Version control
-.git/
-```
