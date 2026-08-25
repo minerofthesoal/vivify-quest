@@ -24,6 +24,21 @@ downloading anything.
 effect to the one qpm produces — the include directories and compile flags are
 verified to match exactly. Don't hand-edit it.
 
+Two things the script checks or fixes up on every restore:
+
+- **Every declared include directory must exist.** CMake accepts a
+  `target_include_directories` path that isn't there without a word, so a wrong
+  path only shows up much later as a wall of "file not found". That is how
+  `fmt`'s `systemIncludes` sat at `fmt/include/` — the qpm *wrapper* layout, one
+  `fmt/` too many, resolving to `extern/includes/fmt/fmt/include` — and broke
+  the build on `fmt/base.h`. The restore now fails and names the directory
+  instead. `--check` applies the same test whenever `extern/` is already
+  populated.
+- **`MOD_VERSION` in `qpm_defines.cmake` is synced from `qpm.json`.** qpm
+  rewrites that file on restore; this script replaces qpm, so without the sync
+  the compiled binary keeps reporting whatever version was current the last
+  time qpm ran (it was still logging 0.4.2 well after `qpm.json` reached 0.8.2).
+
 ## Choosing the source in CI
 
 The build workflow takes a `dependency_source` input when run manually
