@@ -1,0 +1,32 @@
+{
+  "sharedDir": "shared",
+  "dependenciesDir": "extern",
+  "info": {
+    "name": "sombrero",
+    "id": "sombrero",
+    "version": "0.0.1",
+    "url": "https://github.com/Fernthedev/sombrero-quest",
+    "additionalData": {
+      "headersOnly": true
+    }
+  },
+  "dependencies": [
+    {
+      "id": "beatsaber-hook",
+      "versionRange": "*",
+      "additionalData": {}
+    },
+    {
+      "id": "bs-cordl",
+      "versionRange": "*",
+      "additionalData": {
+        "private": true
+      }
+    }
+  ],
+  "workspace": {
+    "scripts": {
+      "build": ["pwsh ./build.ps1"]
+    }
+  }
+}

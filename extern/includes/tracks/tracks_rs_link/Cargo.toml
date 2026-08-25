@@ -1,0 +1,27 @@
+[package]
+name = "tracks_rs_link"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+android_logger = "0.15"
+ctor = "0.11"
+log = "0.4"
+# todo: use version
+tracks_rs = { git = "https://github.com/bsq-ports/tracks-rs.git", features = [
+    "ffi",
+] }
+mimalloc = "0.1"
+# paper2_tracing = { git = "https://github.com/Fernthedev/paperlog.git", package = "paper2_tracing" }
+
+[lib]
+crate-type = ["staticlib"]
+
+[build-dependencies]
+cbindgen = { version = "0.29.0", default-features = false }
+
+[profile.release]
+lto = "fat"
+opt-level = 3
+strip = "none"
+panic = "abort"
