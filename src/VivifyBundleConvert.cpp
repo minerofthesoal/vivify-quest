@@ -1,6 +1,8 @@
 #include "VivifyBundleConvert.hpp"
+#include "VivifySerializedFile.hpp"
 
 #include <algorithm>
+#include <set>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
@@ -1024,6 +1026,74 @@ bool IsUnityBundleFile(std::string const& path) {
   char signature[8] = {};
   if (!in.read(signature, sizeof(signature))) return false;
   return std::memcmp(signature, "UnityFS\0", sizeof(signature)) == 0;
+}
+
+ShaderScan ScanShaders(std::string const& bundlePath) {
+  ShaderScan scan;
+  ArchiveHeader header;
+  std::vector<DirectoryNode> nodes;
+  std::vector<uint8_t> data;
+  Result result;
+
+  FileSource source;
+  if (!source.Open(bundlePath, result)) {
+    scan.message = result.message.empty() ? "bundle unreadable" : result.message;
+    return scan;
+  }
+  std::vector<StorageBlock> blocks;
+  if (!ParseArchive(source, header, blocks, nodes, result) ||
+      !ReadBlocks(source, header, blocks, data, result)) {
+    scan.message = result.message.empty() ? "bundle could not be unpacked" : result.message;
+    return scan;
+  }
+
+  std::set<int32_t> platforms;
+  for (auto const& node : nodes) {
+    if (node.offset >= data.size()) continue;
+    size_t const available = static_cast<size_t>(
+        std::min<uint64_t>(node.size, data.size() - node.offset));
+    auto file = SerializedFileParse::InspectSerializedFile(data.data() + node.offset, available);
+    if (!file.isSerializedFile) continue;  // raw .resS payload node, not an error
+    scan.serializedFiles++;
+    if (scan.unityVersion.empty()) scan.unityVersion = file.unityVersion;
+    if (!file.typeTreePresent) scan.typeTreeStripped = true;
+    scan.shaderObjects += file.shaderObjectCount;
+    for (auto const& shader : file.shaders) {
+      if (!shader.name.empty()) scan.shaderNames.push_back(shader.name);
+      bool runsHere = false;
+      for (int32_t platform : shader.platforms) {
+        platforms.insert(platform);
+        if (SerializedFileParse::ShaderPlatformRunsOnQuest(platform)) runsHere = true;
+      }
+      if (runsHere) scan.shadersRunnableOnQuest++;
+    }
+    if (scan.message.empty() && !file.message.empty()) scan.message = file.message;
+  }
+
+  scan.parsed = scan.serializedFiles > 0;
+  scan.platforms.assign(platforms.begin(), platforms.end());
+  if (!scan.parsed && scan.message.empty()) {
+    scan.message = "no SerializedFile found inside the archive";
+  }
+  return scan;
+}
+
+std::string DescribeShaderScan(ShaderScan const& scan) {
+  if (!scan.parsed) return "shader scan failed: " + scan.message;
+  std::string text = "unity=" + (scan.unityVersion.empty() ? std::string("?") : scan.unityVersion) +
+                     " serializedFiles=" + std::to_string(scan.serializedFiles) +
+                     " shaders=" + std::to_string(scan.shaderObjects) +
+                     " runnableOnQuest=" + std::to_string(scan.shadersRunnableOnQuest) +
+                     " platforms=[";
+  for (size_t i = 0; i < scan.platforms.size(); i++) {
+    if (i != 0) text += ", ";
+    text += std::string(SerializedFileParse::ShaderPlatformName(scan.platforms[i])) + "(" +
+            std::to_string(scan.platforms[i]) + ")";
+  }
+  text += "]";
+  if (scan.typeTreeStripped) text += " typeTree=stripped";
+  if (!scan.message.empty()) text += " note='" + scan.message + "'";
+  return text;
 }
 
 Result ConvertToAndroid(std::string const& sourcePath, std::string const& destPath) {

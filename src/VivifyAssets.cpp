@@ -531,7 +531,21 @@ void Runtime::ConvertPcBundleAsync(std::string const& levelPath, std::string con
     std::string const message = result.message;
     std::string const statusText{BundleConvert::StatusText(result.status)};
 
-    BSML::MainThreadScheduler::Schedule([this, levelPath, sourceBundlePath, loadPath, usable, message, statusText]() {
+    // Report what the source bundle's shaders were actually compiled for. This
+    // is the one place with the answer to "why does this map render with
+    // stand-in shading" that is not a guess: it reads the Shader assets and
+    // names their target platforms. Done on the worker, since it unpacks the
+    // archive a second time.
+    std::string shaderScanText;
+    if (usable) {
+      auto const scan = BundleConvert::ScanShaders(sourceBundlePath);
+      shaderScanText = BundleConvert::DescribeShaderScan(scan);
+    }
+
+    BSML::MainThreadScheduler::Schedule([this, levelPath, sourceBundlePath, loadPath, usable, message, statusText, shaderScanText]() {
+      if (!shaderScanText.empty()) {
+        PaperLogger.info("Vivify source bundle shaders: {}", shaderScanText);
+      }
       // Only clear the in-flight marker if a newer conversion has not claimed it.
       if (_bundleConversionSource == sourceBundlePath) _bundleConversionSource.clear();
       if (usable) {

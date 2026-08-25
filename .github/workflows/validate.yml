@@ -89,3 +89,18 @@ jobs:
     # See the header comment in the script for what it deliberately does not cover.
     - name: Syntax-check every source file
       run: CLANG=clang++-18 ./scripts/host-syntax-check.sh
+
+  shader-scan-tests:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Build the SerializedFile shader scanner for the host, with sanitizers
+      run: |
+        g++ -std=c++20 -O1 -g -fsanitize=address,undefined \
+            -I include -o /tmp/shaderscan \
+            tools/shaderscan/main.cpp src/VivifySerializedFile.cpp
+
+    - name: Shader scanner tests
+      run: python3 tools/shaderscan/run_tests.py /tmp/shaderscan
