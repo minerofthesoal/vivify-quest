@@ -1,5 +1,6 @@
 #include "main.hpp"
 #include "VivifyRuntime.hpp"
+#include "VivifyReport.hpp"
 #include <string>
 #include <string_view>
 #include <fstream>
@@ -211,6 +212,15 @@ void RegisterModSettings() {
         BSML::Lite::CreateUIButton(
             container->get_transform(), u"Force Reconvert All (ignore cache)",
             []() { startConversion(true); });
+
+        // paperlog output is not reachable without adb, so Vivify writes its own
+        // plain-text report next to its data. Showing the path here means the
+        // file can be found without being told where to look.
+        BSML::Lite::CreateText(container->get_transform(),
+                               u"Diagnostics are written to:");
+        BSML::Lite::CreateText(
+            container->get_transform(),
+            StringW("<size=70%>" + Vivify::Report::FilePath() + "</size>"));
       },
       "Vivify", false);
 }

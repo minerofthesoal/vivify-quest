@@ -2,6 +2,7 @@
 #include "VivifyComponents.hpp"
 #include "VivifyBundleConvert.hpp"
 #include "VivifyTextureDecode.hpp"
+#include "VivifyReport.hpp"
 #include "UnityEngine/Texture2D.hpp"
 #include "UnityEngine/TextureFormat.hpp"
 #include <atomic>
@@ -335,7 +336,7 @@ void Runtime::HandleLevelSelected(SongCore::API::LevelSelect::LevelWasSelectedEv
     }
     _preloadedBundlePath.clear();
   }
-  ResetRuntime();
+  ResetRuntime("left the level");
 
   _activeSabers.clear();
   _selectedLevelPath.clear();
@@ -545,6 +546,7 @@ void Runtime::ConvertPcBundleAsync(std::string const& levelPath, std::string con
 
     BSML::MainThreadScheduler::Schedule([this, levelPath, sourceBundlePath, loadPath, usable, message, statusText, shaderScanText]() {
       if (!shaderScanText.empty()) {
+        _sourceBundleScanText = shaderScanText;
         PaperLogger.info("Vivify source bundle shaders: {}", shaderScanText);
       }
       // Only clear the in-flight marker if a newer conversion has not claimed it.
@@ -753,7 +755,12 @@ void Runtime::CacheBundleAssets() {
 // One unconditional verdict per bundle, so a report of "the map is invisible" or
 // "geometry shaders don't work" can be answered from the log without a repro.
 void Runtime::LogBundleShaderAudit(int seen, int runnable, int noProgram, int deviceRejected,
-                                   std::vector<std::string> const& deviceRejectedNames) const {
+                                   std::vector<std::string> const& deviceRejectedNames) {
+  _auditShadersSeen = seen;
+  _auditShadersRunnable = runnable;
+  _auditShadersNoProgram = noProgram;
+  _auditShadersDeviceRejected = deviceRejected;
+  _auditRejectedNames = deviceRejectedNames;
   if (seen == 0) return;
 
   bool const converted = !_preloadedBundlePath.empty() &&
@@ -790,6 +797,89 @@ void Runtime::LogBundleShaderAudit(int seen, int runnable, int noProgram, int de
                        deviceRejected - static_cast<int>(deviceRejectedNames.size()));
     }
   }
+}
+
+// Formats the on-device report for the current level.
+//
+// Written twice per level -- once at load, once at the end -- so that a level
+// which never finishes still leaves the load block behind. Everything a
+// "why is this map broken" question needs is here, because asking a player to
+// retrieve paperlog output is not reasonable.
+std::string Runtime::BuildLevelReport(std::string_view outcome) const {
+  std::string text;
+  auto line = [&text](std::string const& value) { text += value + "\n"; };
+  auto yesNo = [](bool value) { return value ? "yes" : "no"; };
+
+  line(fmt::format("Vivify {}   outcome: {}", VERSION, outcome));
+  line(fmt::format("Device:  {}", _graphicsSummary.empty() ? std::string("(not yet probed)") : _graphicsSummary));
+  line("");
+
+  line("Level");
+  line(fmt::format("  folder:        {}", _selectedLevelPath.empty() ? std::string("(none)") : _selectedLevelPath));
+  line(fmt::format("  bundle loaded: {}", _preloadedBundlePath.empty() ? std::string("(none)") : _preloadedBundlePath));
+  line(fmt::format("  converted:     {}",
+                   yesNo(!_preloadedBundlePath.empty() &&
+                         _preloadedBundlePath.rfind(ConvertedBundleCacheDir(), 0) == 0)));
+  line("");
+
+  // The numbers to read first for a freeze: all of this runs on the main thread
+  // while the level loads.
+  line("Level load timings (main thread)");
+  line(fmt::format("  cache bundle assets: {:8.0f} ms", _loadMsCacheAssets));
+  line(fmt::format("  decode textures:     {:8.0f} ms", _loadMsDecodeTextures));
+  line(fmt::format("  repair shaders:      {:8.0f} ms", _loadMsRepairShaders));
+  line(fmt::format("  total:               {:8.0f} ms", _loadMsTotal));
+  line("");
+
+  line("Frame watchdog");
+  line(fmt::format("  worst frame:        {:8.1f} ms", _worstFrameMs));
+  line(fmt::format("  stood down:         {}", yesNo(_selfDisabledThisLevel)));
+  if (_selfDisabledThisLevel) {
+    line("  Vivify disabled itself for this level after a sustained run of slow");
+    line("  frames, so the game kept running instead of freezing.");
+  }
+  line("");
+
+  line("Shaders in the loaded bundle");
+  line(fmt::format("  total:            {}", _auditShadersSeen));
+  line(fmt::format("  runnable here:    {}", _auditShadersRunnable));
+  line(fmt::format("  no Android build: {}  (DirectX-only; cannot run on any Quest)", _auditShadersNoProgram));
+  line(fmt::format("  refused by GPU:   {}  (built for Android, this GPU took none of them)",
+                   _auditShadersDeviceRejected));
+  for (auto const& name : _auditRejectedNames) {
+    line(fmt::format("    refused: {}", name));
+  }
+  line("");
+
+  line("Shader repair");
+  line(fmt::format("  unusable materials: {}", _shaderRepairAttempts));
+  line(fmt::format("  given a stand-in:   {}", _shaderRepairSucceeded));
+  line(fmt::format("  left broken:        {}", _shaderRepairFailed));
+  line("");
+
+  line("Textures");
+  line(fmt::format("  decoded:            {}", _texturesDecoded));
+  line(fmt::format("  skipped (over time budget): {}", _texturesSkipped));
+
+  if (!_sourceBundleScanText.empty()) {
+    line("");
+    line("Source bundle before conversion");
+    line(fmt::format("  {}", _sourceBundleScanText));
+  }
+  return text;
+}
+
+void Runtime::WriteLevelStartReport() {
+  _levelReportOpen = true;
+  Report::Append("LEVEL STARTED", BuildLevelReport("still playing (this block is written at load)"));
+}
+
+void Runtime::WriteLevelEndReport(std::string_view outcome) {
+  // Only for levels that actually opened a report, so leaving the menu does not
+  // append an empty block every time something calls ResetRuntime.
+  if (!_levelReportOpen) return;
+  _levelReportOpen = false;
+  Report::Append("LEVEL ENDED", BuildLevelReport(outcome));
 }
 
 void Runtime::PreloadBundle(std::string const& bundlePath) {
@@ -878,11 +968,15 @@ void Runtime::LoadMainBundle() {
     return ms;
   };
 
-  double total = 0.0;
-  total += phase("cache bundle assets", [this]() { CacheBundleAssets(); });
-  total += phase("decode textures", [this]() { DecodeUnsupportedBundleTextures(); });
-  total += phase("repair shaders", [this]() { RepairLoadedMaterialShaders(); });
-  PaperLogger.info("Vivify level load: {:.0f}ms total", total);
+  _loadMsCacheAssets = phase("cache bundle assets", [this]() { CacheBundleAssets(); });
+  _loadMsDecodeTextures = phase("decode textures", [this]() { DecodeUnsupportedBundleTextures(); });
+  _loadMsRepairShaders = phase("repair shaders", [this]() { RepairLoadedMaterialShaders(); });
+  _loadMsTotal = _loadMsCacheAssets + _loadMsDecodeTextures + _loadMsRepairShaders;
+  PaperLogger.info("Vivify level load: {:.0f}ms total", _loadMsTotal);
+
+  // Written now, not at the end of the level: if this map is about to freeze,
+  // this block is the only one that will ever reach disk.
+  WriteLevelStartReport();
 }
 
 UnityEngine::Object* Runtime::GetAssetObject(std::string_view assetName) const {
@@ -929,11 +1023,13 @@ void Runtime::LogUnityPlatformInfoOnce() {
   // Shader level is reported as 10x the shader model: 45 is SM4.5. Geometry
   // stages need SM4.0, so anything below 40 rules them out outright; at or
   // above 40 it comes down to the API above.
-  PaperLogger.info(
-      "Vivify graphics: api={} ({}) shaderLevel={} (SM{}.{}) geometryShaderStagePossible={}",
+  _graphicsSummary = fmt::format(
+      "api={} ({}) shaderLevel={} (SM{}.{}) geometryShaderStagePossible={} gpu='{}'",
       GraphicsApiName(graphicsType.value__), graphicsType.value__, shaderLevel, shaderLevel / 10,
       shaderLevel % 10,
-      BoolText(shaderLevel >= 40 && graphicsType.value__ != 0x15));
+      BoolText(shaderLevel >= 40 && graphicsType.value__ != 0x15),
+      ToStdString(UnityEngine::SystemInfo::get_graphicsDeviceName()));
+  PaperLogger.info("Vivify graphics: {}", _graphicsSummary);
 
   if (!GetVivifyDebugLogging()) return;
 
@@ -1375,6 +1471,8 @@ void Runtime::DecodeUnsupportedBundleTextures() {
       }
     }
   }
+  _texturesDecoded = swapped;
+  _texturesSkipped = skipped;
   if (swapped > 0 || skipped > 0) {
     PaperLogger.info(
         "Vivify texture decode: replaced {} unsupported texture reference(s) in {:.0f}ms, skipped {} over budget",

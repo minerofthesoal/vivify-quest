@@ -105,3 +105,18 @@ jobs:
 
     - name: Shader scanner tests
       run: python3 tools/shaderscan/run_tests.py /tmp/shaderscan
+
+  report-writer-tests:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Build the report writer for the host, with sanitizers
+      run: |
+        g++ -std=c++20 -O1 -g -fsanitize=address,undefined \
+            -I include -o /tmp/reporttest \
+            tools/report/main.cpp src/VivifyReport.cpp
+
+    - name: Report writer tests
+      run: /tmp/reporttest

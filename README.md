@@ -417,6 +417,45 @@ fixes. The forced pass removes each cached file before reconverting. Conversion
 writes through a `.part` file and renames, so a failure mid-pass leaves no
 cached bundle rather than a truncated one.
 
+## 0.9.0 — a report file you can actually find
+
+paperlog output lives where a player cannot reach it without adb, so "send me
+the log" was never a reasonable thing to ask. Vivify now writes its own
+plain-text report to a fixed path under its own data directory, visible to any
+file browser or over MTP:
+
+```
+/sdcard/ModData/com.beatgames.beatsaber/Mods/Vivify/VivifyReport.txt
+```
+
+The path is also shown in the Vivify settings menu.
+
+**Two blocks per level.** One when the level starts, one when it ends. The
+start block is written at load, before gameplay, *specifically* so that a level
+which then freezes still leaves its diagnostics on disk — a frozen game never
+reaches the end-of-level write, so anything recorded only at the end would be
+lost exactly when it matters most.
+
+Each block carries the mod version, the graphics API and GPU name, the level
+and bundle paths, whether the bundle was converted, the main-thread level-load
+timings, the frame watchdog's worst frame and whether it stood down, the shader
+audit (how many shaders are runnable, DirectX-only, or refused by this GPU, with
+the refused ones named), shader-repair counts, texture decode counts, and the
+source bundle's shader platforms.
+
+The end block records why the level ended — quit or finished, song restarted, or
+left — along with how far into the song it got. It reports the song position
+rather than guessing "quit" versus "beaten", because by the time the reset runs
+the `AudioTimeSyncController` is usually already gone.
+
+The file is capped at 512KB and trimmed to the newest 256KB on a line boundary,
+so leaving the mod installed cannot fill a headset. A write failure is swallowed
+entirely: a diagnostic file must never be the reason the game breaks.
+
+Covered by `tools/report/` — missing directories, appending rather than
+overwriting, bodies without trailing newlines, the size cap and its trim notice,
+and an unwritable path that must not throw. Ten checks under ASan/UBSan.
+
 ## Converting shaders PC -> Quest
 
 Earlier versions of this README said conversion "cannot translate" DirectX
