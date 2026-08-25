@@ -26,12 +26,11 @@ Thumbs.db
 # Coverage and testing
 coverage/
 htmlcov/
-.coverage
 
 # Compressed archives
 *.gz
 *.tar
-*.tgz
+*.gz
 *.bz2
 *.xz
 *.7z
