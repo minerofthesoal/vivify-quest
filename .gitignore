@@ -1,10 +1,32 @@
 ```
-# Build artifacts and generated includes
-extern/includes/bs-cordl/include/
+# Build artifacts and compiled files
 *.hpp
-*.h
-*.def.hpp
-*.impl.hpp
+*.cpp
+*.o
+*.obj
+*.so
+*.a
+*.lib
+*.dll
+*.exe
+*.out
+
+# Dependency directories
+extern/includes/
+extern/libs/
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*.tmp
+
+# System and environment files
+*.log
+*.env
+*.env.local
+.env.*
 
 # Compressed archives
 *.zip
@@ -30,12 +52,18 @@ extern/includes/bs-cordl/include/
 *.tar.xz
 *.tar.zst
 
-# JSON zip
-types.json.zip
+# Unity/C# specific
+*.meta
+*.pidb
+*.sln
+*.csproj
+*.userprefs
+*.user
+*.unitypackage
 
-# Configuration
-qpm.json
-qpm.shared.json
-version.txt
+# BS-Cordl specific
+extern/includes/bs-cordl/
 
+# Version control
+.git/
 ```

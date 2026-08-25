@@ -58,8 +58,6 @@
     {
       "id": "conditional-dependencies",
       "version": "0.3.0",
-      "repo": "sc2ad/ConditionalDependencies",
-      "ref": "v0.3.0",
       "headersOnly": true,
       "cmake": false
     },
@@ -114,8 +112,6 @@
     {
       "id": "fmt",
       "version": "11.0.2",
-      "repo": "fmtlib/fmt",
-      "ref": "11.0.2",
       "headersOnly": true,
       "compileOptions": {
         "systemIncludes": [
@@ -129,8 +125,6 @@
     {
       "id": "libil2cpp",
       "version": "0.4.0",
-      "repo": "MlgmXyysd/libil2cpp",
-      "ref": "v0.4.0",
       "headersOnly": true,
       "compileOptions": {
         "systemIncludes": [
@@ -169,8 +163,6 @@
     {
       "id": "rapidjson-macros",
       "version": "2.1.0",
-      "repo": "Metalit/RapidjsonMacros",
-      "ref": "v2.1.0",
       "headersOnly": true,
       "cmake": false
     },
