@@ -1,9 +1,31 @@
-import os, sys, subprocess, itertools, struct
+import os, sys, subprocess, itertools, struct, tempfile
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from mkbundle import build, read_converted, target_of
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-CONV = os.environ.get("VIVIFY_CONV", "/tmp/conv")
+def _build_default_binary() -> str:
+    """Compile the converter from the current sources.
+
+    Defaulting to a prebuilt /tmp/conv meant a local run could pass against a
+    binary built before the change under test -- which is exactly how a link
+    error against VivifySerializedFile.cpp reached CI green-looking. Set
+    VIVIFY_CONV to skip this and test a binary you built yourself.
+    """
+    root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    out = os.path.join(tempfile.mkdtemp(prefix="vivify-conv-"), "conv")
+    cmd = [
+        os.environ.get("CXX", "g++"), "-std=c++20", "-O1", "-g",
+        "-fsanitize=address,undefined", "-I", os.path.join(root, "include"),
+        "-o", out,
+        os.path.join(root, "tools", "bundleconvert", "main.cpp"),
+        os.path.join(root, "src", "VivifyBundleConvert.cpp"),
+        os.path.join(root, "src", "VivifySerializedFile.cpp"),
+    ]
+    subprocess.run(cmd, check=True)
+    return out
+
+
+CONV = os.environ.get("VIVIFY_CONV") or _build_default_binary()
 TMP  = os.path.join(HERE, "work")
 os.makedirs(TMP, exist_ok=True)
 
