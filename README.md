@@ -324,9 +324,62 @@ hierarchies, animations, animator controllers, audio, text assets and material
 *definitions* are stored platform-independently and come through intact.
 Shaders and block-compressed textures do not: a Windows bundle carries DirectX
 shader bytecode and BC/DXT texture data, neither of which an Adreno GPU can
-consume. Converted bundles therefore fall back to Vivify's replacement-shader
+consume. (Textures are now decoded on device; see the BC/DXT section. Shaders
+are not -- see "Converting shaders PC -> Quest" below for why that is a project
+rather than an impossibility.) Converted bundles therefore fall back to Vivify's replacement-shader
 path rather than the mapper's intended shading. It is a rescue path for maps
 that have no Android bundle yet — not a substitute for one.
+
+## Converting shaders PC -> Quest
+
+Earlier versions of this README said conversion "cannot translate" DirectX
+bytecode, which overstated it. It is not impossible; it is a substantial project
+that has not been done. The honest state of it:
+
+**Why it is possible in principle.** Unity's own DXBC cross-compiler,
+[HLSLcc](https://github.com/Unity-Technologies/HLSLcc), turns DirectX bytecode
+into GLSL, GLSL ES, Metal and Vulkan GLSL -- it is the tool Unity uses to build
+GLES shaders in the first place. And for OpenGL ES targets Unity does not store
+a binary at all: the shader blob holds **GLSL source text**. So the output format
+is writable, not a proprietary binary blob.
+
+**Why it has not been done here.** Four pieces are needed, and only the first
+exists today:
+
+1. **Locate and decode Shader assets in the bundle.** Done --
+   `VivifySerializedFile.cpp` parses the SerializedFile object table and walks
+   Shader objects through the embedded type tree. Covered by `tools/shaderscan/`.
+2. **Decode Unity's shader blob**: LZ4-decompress `compressedBlob`, split it per
+   sub-program using `offsets`/`compressedLengths`, and parse each program's
+   Unity-specific header and reflection tables.
+3. **Cross-compile** each DXBC program to GLSL ES 3.x (or to SPIR-V via glslang,
+   under Vulkan), which means vendoring HLSLcc -- roughly 30k lines of C++ --
+   into an ARM64 Android mod.
+4. **Re-serialize**: rewrite `platforms`, re-encode the blob, and then fix every
+   object offset in the SerializedFile, because the Shader object's size changes
+   and the object table stores absolute byte offsets.
+
+Step 4 is what makes this more than a cross-compiler bolt-on: the converter
+today rewrites a single `int32` in place and never changes any object's size.
+Rewriting shaders means rebuilding the whole serialized file.
+
+None of this can be verified without a Quest and real maps, and a half-correct
+implementation would corrupt bundles that currently load and render with
+stand-in shading. So the parser landed first, with tests, and the rest is not
+claimed as working.
+
+**What to check on a real map.** Every conversion now logs what the source
+bundle's shaders were actually built for:
+
+```
+Vivify source bundle shaders: unity=2021.3.16f1 serializedFiles=1 shaders=24 runnableOnQuest=0 platforms=[Direct3D 11(4)]
+```
+
+`runnableOnQuest` counts shaders carrying a GLES3 or Vulkan program. If it is 0
+and `platforms` is Direct3D-only, the map's own shading -- raymarching included
+-- cannot run until steps 2-4 exist or the mapper ships an Android bundle. If it
+is non-zero, the shaders are present and something else is wrong, which is a
+different and much smaller problem.
 
 ## Geometry shaders
 

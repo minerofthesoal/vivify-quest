@@ -31,6 +31,7 @@
 #include <cstdint>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace Vivify::BundleConvert {
 
@@ -87,6 +88,30 @@ Result ConvertToAndroid(std::string const& sourcePath, std::string const& destPa
 // "bundleWindows2019"/"bundleWindows2021" with no extension at all -- so
 // content is the only dependable way to find one in a song folder.
 bool IsUnityBundleFile(std::string const& path);
+
+// What the shaders inside a bundle were actually compiled for.
+//
+// Reads the bundle's Shader assets and reports the union of the GPU platforms
+// their programs target. This exists because "a PC bundle's shaders are DirectX
+// bytecode" had been asserted throughout this port without ever being measured
+// against a real bundle -- and because it is the first thing any actual shader
+// conversion needs: you cannot rewrite programs you cannot locate.
+struct ShaderScan {
+  bool parsed = false;
+  bool typeTreeStripped = false;   // built with DisableWriteTypeTree: contents undecodable
+  int serializedFiles = 0;
+  int shaderObjects = 0;
+  int shadersRunnableOnQuest = 0;  // shaders carrying a GLES3 or Vulkan program
+  std::vector<int32_t> platforms;  // union across every shader, ascending
+  std::vector<std::string> shaderNames;
+  std::string unityVersion;
+  std::string message;
+};
+
+ShaderScan ScanShaders(std::string const& bundlePath);
+
+// Human-readable one-line summary of a ShaderScan, for the log.
+std::string DescribeShaderScan(ShaderScan const& scan);
 
 std::string_view StatusText(Status status);
 std::string BuildTargetName(int32_t target);
