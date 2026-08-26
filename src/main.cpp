@@ -34,6 +34,7 @@ constexpr std::string_view kDisableVisualsInMultiplayerConfigKey = "disableVisua
 constexpr std::string_view kDisableVRCenterAdjustConfigKey = "disableVRCenterAdjust";
 constexpr std::string_view kConvertPcBundlesOnDeviceConfigKey = "convertPcBundlesOnDevice";
 constexpr std::string_view kStandInShadingConfigKey = "standInShading";
+constexpr std::string_view kSubmitScoresConfigKey = "submitScoresOnVivifyMaps";
 bool gMultipassRenderingEnabled = true;
 bool gVivifyDebugLogging = false;
 bool gDisableBeat0FilmgrainBlit = false;
@@ -58,6 +59,12 @@ bool gConvertPcBundlesOnDevice = true;
 // white. Turning this off leaves such meshes undrawn instead, which also means
 // notes and sabers keep the game's own visuals rather than a white stand-in.
 bool gStandInShading = true;
+// Vivify does not change note timing, scoring, or anything else a leaderboard
+// cares about -- it changes how a map looks. Submission was nevertheless being
+// turned off for every map carrying the Vivify requirement, and with it off
+// BeatLeader and ScoreSaber record no replay, so Vivify maps had no replays to
+// watch or render at all.
+bool gSubmitScores = true;
 
 // Both diagnostic files live beside the mod's own data, and both are .txt.
 //
@@ -181,6 +188,16 @@ void RegisterModSettings() {
         if (!firstActivation || viewController == nullptr) return;
         auto* container = BSML::Lite::CreateScrollableSettingsContainer(viewController->get_transform());
         if (container == nullptr) return;
+
+        // Which build is actually running, in the headset, without a file.
+        // "the new features do not work" and "the new build did not install"
+        // look identical from the outside, and a version number here separates
+        // them in one glance.
+        BSML::Lite::CreateText(
+            container->get_transform(),
+            std::u16string(u"Vivify ") +
+                std::u16string(std::string(VERSION).begin(), std::string(VERSION).end()));
+
         BSML::Lite::CreateToggle(
             container->get_transform(), u"Debug logging", GetVivifyDebugLogging(),
             [](bool value) { SetBoolConfigValue(kVivifyDebugLoggingConfigKey, value, gVivifyDebugLogging); });
@@ -213,6 +230,11 @@ void RegisterModSettings() {
             container->get_transform(), u"Stand-In Shading For Unsupported Shaders",
             GetStandInShading(),
             [](bool value) { SetBoolConfigValue(kStandInShadingConfigKey, value, gStandInShading); });
+
+        BSML::Lite::CreateToggle(
+            container->get_transform(), u"Submit Scores On Vivify Maps",
+            GetSubmitScoresOnVivifyMaps(),
+            [](bool value) { SetBoolConfigValue(kSubmitScoresConfigKey, value, gSubmitScores); });
 
         // A map whose only asset bundle is a PC build has its play button
         // disabled, so it can never be selected into -- which also means the
@@ -326,6 +348,10 @@ bool GetStandInShading() {
   return gStandInShading;
 }
 
+bool GetSubmitScoresOnVivifyMaps() {
+  return gSubmitScores;
+}
+
 void EnsureConfigDefaults() {
   auto& config = getConfig();
   auto& doc = config.config;
@@ -343,6 +369,7 @@ void EnsureConfigDefaults() {
   needsWrite |= EnsureBoolConfigValue(kDisableVRCenterAdjustConfigKey, false, gDisableVRCenterAdjust);
   needsWrite |= EnsureBoolConfigValue(kConvertPcBundlesOnDeviceConfigKey, true, gConvertPcBundlesOnDevice);
   needsWrite |= EnsureBoolConfigValue(kStandInShadingConfigKey, true, gStandInShading);
+  needsWrite |= EnsureBoolConfigValue(kSubmitScoresConfigKey, true, gSubmitScores);
   if (needsWrite) {
     config.Write();
   }

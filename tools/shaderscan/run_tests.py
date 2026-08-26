@@ -60,6 +60,30 @@ def run3(data):
     return proc, fields, shaders
 
 
+def reencode(data):
+    path = os.path.join(tmpdir, "reencode.sf")
+    with open(path, "wb") as handle:
+        handle.write(data)
+    proc = subprocess.run([BINARY, "--reencode", path], capture_output=True, timeout=120)
+    out = {}
+    for line in proc.stdout.decode("utf-8", errors="replace").splitlines():
+        key, _, value = line.partition("=")
+        out[key] = value
+    return proc, out
+
+
+def lz4c(plain):
+    src = os.path.join(tmpdir, "plain.bin")
+    dst = os.path.join(tmpdir, "packed.lz4")
+    with open(src, "wb") as handle:
+        handle.write(plain)
+    proc = subprocess.run([BINARY, "--lz4c", src, dst], capture_output=True, timeout=60)
+    if proc.returncode != 0:
+        return None
+    with open(dst, "rb") as handle:
+        return handle.read()
+
+
 def rewrite(data, edits=(), sf_version=21):
     """Rewrites a SerializedFile through the C++ writer and reports both what
     the writer said and what the result parses back as."""
@@ -369,6 +393,98 @@ for _ in range(200):
         rewrite_crashes += 1
 check("no corrupted file crashes the rewriter", rewrite_crashes == 0,
       f"{rewrite_crashes} bad exits")
+
+
+# --- writing programs back (conversion step 3, the half that is not HLSLcc) ---
+#
+# A converted shader has to go back into the bundle. The encoder is checked two
+# ways: against the reference LZ4 library, so it agrees with the decompressor
+# Unity will actually use rather than only with the decoder in the same file;
+# and by round-tripping real programs, so nothing is lost on the way out.
+
+try:
+    import lz4.block as _lz4
+except ImportError:
+    _lz4 = None
+check("the reference lz4 library is available to cross-check against", _lz4 is not None,
+      "pip install lz4")
+
+if _lz4 is not None:
+    corpus = [
+        GLSL * 40,
+        b"x" * 5000,
+        bytes(random.Random(11).randrange(256) for _ in range(9000)),
+        b"a", b"abcd", b"abcde" * 3, b"\x00" * 100000,
+        bytes(random.Random(12).randrange(4) for _ in range(30000)),
+    ]
+    rnd4 = random.Random(20260828)
+    for _ in range(40):
+        length = rnd4.randrange(1, 3000)
+        alphabet = rnd4.randrange(1, 40)
+        corpus.append(bytes(rnd4.randrange(alphabet) for _ in range(length)))
+
+    bad = 0
+    packed_total = 0
+    plain_total = 0
+    for plain in corpus:
+        packed = lz4c(plain)
+        if packed is None:
+            bad += 1
+            continue
+        plain_total += len(plain)
+        packed_total += len(packed)
+        try:
+            if _lz4.decompress(packed, uncompressed_size=len(plain)) != plain:
+                bad += 1
+        except Exception:
+            bad += 1
+    check("every compressed block decompresses under the reference lz4 library",
+          bad == 0, f"{bad}/{len(corpus)} failed")
+    check("compression actually compresses", packed_total < plain_total,
+          f"{packed_total} vs {plain_total}")
+
+    # And the other direction: reference-compressed blocks must decode here,
+    # since a real bundle's blobs were written by Unity's encoder, not ours.
+    bad = 0
+    for plain in corpus[:12]:
+        for mode in ("default", "high_compression"):
+            block = _lz4.compress(plain, mode=mode, store_size=False)
+            _, out = lz4(block, len(plain))
+            if out.get("lz4Written") != str(len(plain)):
+                bad += 1
+    check("reference-compressed blocks decode here", bad == 0, f"{bad} failed")
+
+# Round-tripping real programs through encode and back.
+_, out = reencode(mkshader.serialized_file_with_shaders(
+    [("Custom/Bitcrush", [mkshader.GLES3PLUS], [[android]])]))
+check("re-encoded programs decode back identically",
+      out.get("reencodeShaders") == "1" and out.get("reencodeMatched") == "1" and
+      out.get("reencodeMismatched") == "0", out)
+
+_, out = reencode(mkshader.serialized_file_with_shaders(
+    [("Custom/Both", [mkshader.D3D11, mkshader.GLES3PLUS], [[windows], [android]])]))
+check("two platforms survive a re-encode", out.get("reencodeMatched") == "1" and
+      out.get("reencodeMismatched") == "0", out)
+
+_, out = reencode(mkshader.serialized_file_with_shaders(
+    [("Custom/Wide", [mkshader.GLES3PLUS], [[wide]])]))
+check("12-byte table entries survive a re-encode", out.get("reencodeMatched") == "1" and
+      out.get("reencodeMismatched") == "0", out)
+
+_, out = reencode(mkshader.serialized_file_with_shaders(
+    [("Custom/Older", [mkshader.GLES3PLUS], [[older]])]))
+check("the 2018 format's two keyword tables survive a re-encode",
+      out.get("reencodeMatched") == "1" and out.get("reencodeMismatched") == "0", out)
+
+many = mkshader.program_blob([
+    mkshader.sub_program(mkshader.GLES3, GLSL, keywords=["DIRECTIONAL", "FOG_EXP2", "LIGHTPROBE_SH"]),
+    mkshader.sub_program(mkshader.GLES3, b"#version 300 es\nvoid main(){}"),
+    mkshader.sub_program(mkshader.GLES3, GLSL * 8),
+])
+_, out = reencode(mkshader.serialized_file_with_shaders(
+    [("Custom/Many", [mkshader.GLES3PLUS], [[many, android]])]))
+check("several sub-blobs and keywords survive a re-encode",
+      out.get("reencodeMatched") == "1" and out.get("reencodeMismatched") == "0", out)
 
 print()
 print(f"{passed}/{passed + failed} passed")

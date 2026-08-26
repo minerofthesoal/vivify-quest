@@ -101,14 +101,27 @@ bool GpuProgramIsGlslSource(int32_t programType);
 
 // One compiled program out of a shader's blob -- a single stage (vertex,
 // fragment, geometry, ...) for a single GPU platform.
+// Everything in a sub-program is kept, including the parts nothing here reads.
+//
+// A write-back path that dropped the statistics block, or merged the two
+// keyword tables, or lost the trailing alignment, would produce a program that
+// is *nearly* the one Unity wrote. Decoding and re-encoding an untouched
+// program has to give back exactly the bytes it started as, or there is no way
+// to tell a conversion bug from a re-encoding bug.
 struct ShaderSubProgram {
   int32_t platform = 0;     // ShaderCompilerPlatform of the blob it came from
-  int32_t blobIndex = 0;    // which sub-blob of that platform
+  int32_t groupIndex = 0;   // which platform group of the store
+  int32_t blobIndex = 0;    // which sub-blob of that group
   int32_t programIndex = 0; // position within that sub-blob
   int32_t blobVersion = 0;  // Unity's sub-program format version
   int32_t programType = 0;  // ShaderGpuProgramType
+  int32_t entrySize = 8;    // program-table entry width of the sub-blob it came from
+
+  std::vector<uint8_t> stats;              // the fixed block this code steps over
   std::vector<std::string> keywords;
-  std::vector<uint8_t> code;  // GLSL source text for GLES targets; DXBC for D3D11
+  std::vector<std::string> localKeywords;  // 2018.06 - 2020.12 only
+  std::vector<uint8_t> code;               // GLSL source text for GLES targets; DXBC for D3D11
+  std::vector<uint8_t> trailing;           // padding after the code, kept verbatim
 };
 
 struct ShaderObject {
@@ -179,6 +192,45 @@ struct RewriteResult {
 // than the file's own version can store.
 RewriteResult RewriteSerializedFile(uint8_t const* data, size_t size,
                                     std::vector<ObjectEdit> const& edits);
+
+// A shader's program store, ready to be written back into a Shader object.
+struct EncodedProgramStore {
+  bool ok = false;
+  std::vector<std::vector<int32_t>> offsets;
+  std::vector<std::vector<int32_t>> compressedLengths;
+  std::vector<std::vector<int32_t>> decompressedLengths;
+  std::vector<uint8_t> blob;
+  std::string message;
+};
+
+// Builds a compressed program store out of sub-programs -- the inverse of
+// DecodeShaderPrograms.
+//
+// `platforms` gives the group order, which is the shader's own platforms array;
+// each program is placed by its groupIndex and blobIndex, and programs sharing
+// a sub-blob keep their programIndex order.
+//
+// The blob this produces is not byte-identical to the one Unity wrote, because
+// the LZ4 encoder here is not Unity's. What must be identical is what comes
+// back out: decoding this store has to yield the programs that went in.
+EncodedProgramStore EncodeShaderPrograms(std::vector<int32_t> const& platforms,
+                                         std::vector<ShaderSubProgram> const& programs);
+
+// LZ4 block-format compression, for writing a converted shader's programs back
+// into a bundle.
+//
+// Returns the number of bytes written, or 0 if the result would not fit in
+// dstCapacity (or the input is empty). Give it at least
+// Lz4CompressBound(srcSize) to be sure of a result.
+//
+// This is a single-pass matcher, not a ratio-chasing one: it runs on a headset
+// during conversion, and the alternative to a slightly larger blob is no
+// converted shader at all.
+size_t Lz4CompressBlock(uint8_t const* src, size_t srcSize, uint8_t* dst, size_t dstCapacity);
+
+// The largest output Lz4CompressBlock can produce for an input of this size --
+// the all-literals case, which is bigger than the input.
+size_t Lz4CompressBound(size_t srcSize);
 
 // LZ4 block-format decompression, exposed for testing.
 //

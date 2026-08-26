@@ -36,6 +36,85 @@ int main(int argc, char** argv) {
     std::printf("lz4Out=%s\n", text.c_str());
     return written > 0 ? 0 : 1;
   }
+  // Re-encode mode: --reencode <serialized-file>
+  //
+  // Decodes every shader's programs, encodes them straight back, decodes the
+  // result, and reports whether the two program lists match. That round trip is
+  // the property a write-back path lives or dies on: the blob bytes cannot
+  // match Unity's (a different LZ4 encoder wrote them) but what comes back out
+  // of it must.
+  if (std::string(argv[1]) == "--reencode") {
+    if (argc < 3) return 2;
+    std::ifstream in(argv[2], std::ios::binary);
+    if (!in) return 2;
+    std::vector<uint8_t> bytes((std::istreambuf_iterator<char>(in)),
+                               std::istreambuf_iterator<char>());
+    auto report = SerializedFileParse::InspectSerializedFile(bytes.data(), bytes.size());
+    int shaders = 0;
+    int matched = 0;
+    int mismatched = 0;
+    for (auto const& shader : report.shaders) {
+      auto first = SerializedFileParse::DecodeShaderPrograms(bytes.data(), bytes.size(), shader);
+      if (first.programs.empty()) continue;
+      shaders++;
+
+      auto store = SerializedFileParse::EncodeShaderPrograms(shader.platforms, first.programs);
+      if (!store.ok) {
+        std::printf("encodeMessage=%s\n", store.message.c_str());
+        mismatched++;
+        continue;
+      }
+
+      // Point a shader at the freshly built store and read it back.
+      SerializedFileParse::ShaderObject rebuilt = shader;
+      rebuilt.offsets = store.offsets;
+      rebuilt.compressedLengths = store.compressedLengths;
+      rebuilt.decompressedLengths = store.decompressedLengths;
+      rebuilt.blobPresent = true;
+      rebuilt.blobFileOffset = 0;
+      rebuilt.blobSize = store.blob.size();
+      auto second = SerializedFileParse::DecodeShaderPrograms(store.blob.data(), store.blob.size(),
+                                                              rebuilt);
+
+      bool same = second.ok && second.programs.size() == first.programs.size();
+      for (size_t i = 0; same && i < first.programs.size(); i++) {
+        auto const& a = first.programs[i];
+        auto const& b = second.programs[i];
+        same = a.platform == b.platform && a.groupIndex == b.groupIndex &&
+               a.blobIndex == b.blobIndex && a.programIndex == b.programIndex &&
+               a.blobVersion == b.blobVersion && a.programType == b.programType &&
+               a.entrySize == b.entrySize && a.stats == b.stats && a.keywords == b.keywords &&
+               a.localKeywords == b.localKeywords && a.code == b.code && a.trailing == b.trailing;
+      }
+      if (same) matched++; else mismatched++;
+    }
+    std::printf("reencodeShaders=%d\n", shaders);
+    std::printf("reencodeMatched=%d\n", matched);
+    std::printf("reencodeMismatched=%d\n", mismatched);
+    return mismatched == 0 ? 0 : 1;
+  }
+
+  // Compression mode: --lz4c <plain-file> <out-file>. The output is a raw LZ4
+  // block, which run_tests.py hands to the reference lz4 library -- the only
+  // way to know this agrees with what Unity's own decompressor will do, rather
+  // than only with the decoder in this same file.
+  if (std::string(argv[1]) == "--lz4c") {
+    if (argc < 4) return 2;
+    std::ifstream plainStream(argv[2], std::ios::binary);
+    if (!plainStream) return 2;
+    std::vector<uint8_t> plain((std::istreambuf_iterator<char>(plainStream)),
+                               std::istreambuf_iterator<char>());
+    std::vector<uint8_t> packed(SerializedFileParse::Lz4CompressBound(plain.size()));
+    size_t const written =
+        SerializedFileParse::Lz4CompressBlock(plain.data(), plain.size(), packed.data(), packed.size());
+    std::printf("lz4cWritten=%zu\n", written);
+    std::printf("lz4cInput=%zu\n", plain.size());
+    if (written == 0) return 1;
+    std::ofstream out(argv[3], std::ios::binary | std::ios::trunc);
+    out.write(reinterpret_cast<char const*>(packed.data()), static_cast<std::streamsize>(written));
+    return out.good() ? 0 : 2;
+  }
+
   // Rewrite mode: --rewrite <file> <out> [pathID=hexbytes ...]
   //
   // Prints what the rewritten file parses back as, so run_tests.py can check

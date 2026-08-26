@@ -416,6 +416,124 @@ bool GpuProgramIsGlslSource(int32_t programType) {
   }
 }
 
+size_t Lz4CompressBound(size_t srcSize) {
+  // One token plus a length extension byte per 255, plus the literals.
+  return srcSize + srcSize / 255 + 16;
+}
+
+// LZ4 block format, compression.
+//
+// A single hash table of recent positions, one probe per position: the same
+// shape as LZ4's "fast" mode. Shader blobs are GLSL text and DXBC, both of
+// which this finds plenty of matches in, and conversion happens once per map on
+// a device that would rather not spend a minute searching for a better one.
+//
+// Every write is bounds-checked and the function gives up rather than
+// overrunning, because the caller sizes the buffer from Lz4CompressBound and a
+// mistake there must not become a heap overflow on a headset.
+size_t Lz4CompressBlock(uint8_t const* src, size_t srcSize, uint8_t* dst, size_t dstCapacity) {
+  if (src == nullptr || dst == nullptr || srcSize == 0) return 0;
+
+  constexpr size_t kMinMatch = 4;
+  constexpr size_t kLastLiterals = 5;
+  // The format forbids a match starting inside the last 12 bytes.
+  constexpr size_t kMatchFindLimit = 12;
+  constexpr uint32_t kEmpty = 0xffffffffu;
+  constexpr int kHashBits = 12;
+
+  auto read32 = [src](size_t at) {
+    return static_cast<uint32_t>(src[at]) | (static_cast<uint32_t>(src[at + 1]) << 8) |
+           (static_cast<uint32_t>(src[at + 2]) << 16) | (static_cast<uint32_t>(src[at + 3]) << 24);
+  };
+  auto hash = [](uint32_t value) { return (value * 2654435761u) >> (32 - kHashBits); };
+
+  size_t op = 0;
+  size_t anchor = 0;
+
+  // Writes a token's length nibble plus any extension bytes. Returns false if
+  // the output buffer is full.
+  auto writeLength = [&](size_t length, uint8_t& nibble) {
+    if (length < 15) {
+      nibble = static_cast<uint8_t>(length);
+      return true;
+    }
+    nibble = 15;
+    size_t rest = length - 15;
+    while (rest >= 255) {
+      if (op >= dstCapacity) return false;
+      dst[op++] = 255;
+      rest -= 255;
+    }
+    if (op >= dstCapacity) return false;
+    dst[op++] = static_cast<uint8_t>(rest);
+    return true;
+  };
+
+  size_t const matchLimit = srcSize > kLastLiterals ? srcSize - kLastLiterals : 0;
+  size_t const findLimit = srcSize > kMatchFindLimit ? srcSize - kMatchFindLimit : 0;
+
+  if (findLimit > 0) {
+    std::vector<uint32_t> table(static_cast<size_t>(1) << kHashBits, kEmpty);
+    table[hash(read32(0))] = 0;
+    size_t ip = 1;
+    while (ip < findLimit) {
+      uint32_t const h = hash(read32(ip));
+      uint32_t const candidate = table[h];
+      table[h] = static_cast<uint32_t>(ip);
+      if (candidate == kEmpty || ip - candidate > 65535 || read32(candidate) != read32(ip)) {
+        ip++;
+        continue;
+      }
+
+      size_t matchLength = kMinMatch;
+      while (ip + matchLength < matchLimit && src[candidate + matchLength] == src[ip + matchLength]) {
+        matchLength++;
+      }
+
+      size_t const literalLength = ip - anchor;
+      size_t const tokenPos = op;
+      if (op >= dstCapacity) return 0;
+      op++;
+
+      uint8_t literalNibble = 0;
+      if (!writeLength(literalLength, literalNibble)) return 0;
+      if (literalLength > dstCapacity - op) return 0;
+      std::memcpy(dst + op, src + anchor, literalLength);
+      op += literalLength;
+
+      size_t const offset = ip - candidate;
+      if (dstCapacity - op < 2) return 0;
+      dst[op++] = static_cast<uint8_t>(offset & 0xff);
+      dst[op++] = static_cast<uint8_t>(offset >> 8);
+
+      uint8_t matchNibble = 0;
+      if (!writeLength(matchLength - kMinMatch, matchNibble)) return 0;
+      dst[tokenPos] = static_cast<uint8_t>((literalNibble << 4) | matchNibble);
+
+      ip += matchLength;
+      anchor = ip;
+      // Seeding one position back picks up matches that start mid-run, which
+      // costs nothing and is what LZ4 itself does.
+      if (ip >= 2 && ip < findLimit) table[hash(read32(ip - 2))] = static_cast<uint32_t>(ip - 2);
+    }
+  }
+
+  // The block always ends with a literals-only sequence: the format requires
+  // the last five bytes to be literals, and a trailing match has nowhere to
+  // put its token.
+  size_t const literalLength = srcSize - anchor;
+  size_t const tokenPos = op;
+  if (op >= dstCapacity) return 0;
+  op++;
+  uint8_t literalNibble = 0;
+  if (!writeLength(literalLength, literalNibble)) return 0;
+  if (literalLength > dstCapacity - op) return 0;
+  std::memcpy(dst + op, src + anchor, literalLength);
+  op += literalLength;
+  dst[tokenPos] = static_cast<uint8_t>(literalNibble << 4);
+  return op;
+}
+
 // LZ4 block format, decompression only.
 //
 // A block is a sequence of: one token byte, high nibble = literal length, low
@@ -489,7 +607,7 @@ namespace {
 // one of the two lays every program inside the blob and clear of the table
 // itself, so the layout is checked instead of assumed.
 bool ReadProgramTable(uint8_t const* blob, size_t blobSize,
-                      std::vector<std::pair<uint32_t, uint32_t>>& out) {
+                      std::vector<std::pair<uint32_t, uint32_t>>& out, int32_t& entryWidth) {
   if (blobSize < 4) return false;
   auto readU32 = [blob](size_t at) {
     return static_cast<uint32_t>(blob[at]) | (static_cast<uint32_t>(blob[at + 1]) << 8) |
@@ -518,6 +636,7 @@ bool ReadProgramTable(uint8_t const* blob, size_t blobSize,
     }
     if (good) {
       out = std::move(candidate);
+      entryWidth = static_cast<int32_t>(entrySize);
       return true;
     }
   }
@@ -533,44 +652,175 @@ bool ReadSubProgram(uint8_t const* data, size_t size, ShaderSubProgram& out) {
   Reader reader(data, size);
   out.blobVersion = static_cast<int32_t>(reader.u32());
   out.programType = static_cast<int32_t>(reader.u32());
-  reader.skip(12);
-  if (out.blobVersion >= 201608170) reader.skip(4);
-  if (!reader.ok()) return false;
 
-  uint32_t const keywordCount = reader.u32();
-  if (!reader.ok() || keywordCount > reader.remaining() / 4) return false;
-  for (uint32_t i = 0; i < keywordCount; i++) {
-    uint32_t const length = reader.u32();
-    if (!reader.ok() || length > reader.remaining()) return false;
-    std::string keyword(length, '\0');
-    if (length > 0 && !reader.raw(reinterpret_cast<uint8_t*>(keyword.data()), length)) return false;
-    reader.align4();
-    out.keywords.push_back(std::move(keyword));
-  }
+  // The statistics block is stepped over rather than interpreted, but it is
+  // kept: a re-encoded program has to be the one Unity wrote, not a nearly
+  // identical one, or a conversion bug and a re-encoding bug look the same.
+  size_t const statsSize = out.blobVersion >= 201608170 ? 16u : 12u;
+  if (statsSize > reader.remaining()) return false;
+  out.stats.resize(statsSize);
+  if (!reader.raw(out.stats.data(), statsSize)) return false;
 
-  // 2018.06 through 2020.12 wrote a second, local keyword table in the same
-  // shape immediately after the first.
-  if (out.blobVersion >= 201806140 && out.blobVersion < 202012090) {
-    uint32_t const localCount = reader.u32();
-    if (!reader.ok() || localCount > reader.remaining() / 4) return false;
-    for (uint32_t i = 0; i < localCount; i++) {
+  auto readKeywords = [&reader](std::vector<std::string>& into) {
+    uint32_t const count = reader.u32();
+    if (!reader.ok() || count > reader.remaining() / 4) return false;
+    for (uint32_t i = 0; i < count; i++) {
       uint32_t const length = reader.u32();
       if (!reader.ok() || length > reader.remaining()) return false;
       std::string keyword(length, '\0');
       if (length > 0 && !reader.raw(reinterpret_cast<uint8_t*>(keyword.data()), length)) return false;
       reader.align4();
-      out.keywords.push_back(std::move(keyword));
+      into.push_back(std::move(keyword));
     }
+    return true;
+  };
+
+  if (!readKeywords(out.keywords)) return false;
+  // 2018.06 through 2020.12 wrote a second, local keyword table in the same
+  // shape immediately after the first. It is kept separate from the first so
+  // re-encoding puts each back where it came from.
+  if (out.blobVersion >= 201806140 && out.blobVersion < 202012090) {
+    if (!readKeywords(out.localKeywords)) return false;
   }
 
   uint32_t const codeLength = reader.u32();
   if (!reader.ok() || codeLength > reader.remaining()) return false;
   out.code.resize(codeLength);
   if (codeLength > 0 && !reader.raw(out.code.data(), codeLength)) return false;
+
+  // Whatever Unity left after the code -- alignment padding, and any trailing
+  // field this code does not model -- travels with the program.
+  size_t const trailing = reader.remaining();
+  out.trailing.resize(trailing);
+  if (trailing > 0 && !reader.raw(out.trailing.data(), trailing)) return false;
   return true;
 }
 
+// Serializes a sub-program back into the bytes it was read from. Exactly the
+// inverse of ReadSubProgram, field for field.
+void WriteSubProgram(ShaderSubProgram const& program, std::vector<uint8_t>& out) {
+  size_t const start = out.size();
+  auto putU32 = [&out](uint32_t value) {
+    out.push_back(static_cast<uint8_t>(value & 0xff));
+    out.push_back(static_cast<uint8_t>((value >> 8) & 0xff));
+    out.push_back(static_cast<uint8_t>((value >> 16) & 0xff));
+    out.push_back(static_cast<uint8_t>((value >> 24) & 0xff));
+  };
+  auto align4 = [&out, start]() {
+    while ((out.size() - start) % 4 != 0) out.push_back(0);
+  };
+
+  putU32(static_cast<uint32_t>(program.blobVersion));
+  putU32(static_cast<uint32_t>(program.programType));
+  out.insert(out.end(), program.stats.begin(), program.stats.end());
+
+  auto putKeywords = [&](std::vector<std::string> const& keywords) {
+    putU32(static_cast<uint32_t>(keywords.size()));
+    for (auto const& keyword : keywords) {
+      putU32(static_cast<uint32_t>(keyword.size()));
+      out.insert(out.end(), keyword.begin(), keyword.end());
+      align4();
+    }
+  };
+  putKeywords(program.keywords);
+  if (program.blobVersion >= 201806140 && program.blobVersion < 202012090) {
+    putKeywords(program.localKeywords);
+  }
+
+  putU32(static_cast<uint32_t>(program.code.size()));
+  out.insert(out.end(), program.code.begin(), program.code.end());
+  out.insert(out.end(), program.trailing.begin(), program.trailing.end());
+}
+
 }  // namespace
+
+EncodedProgramStore EncodeShaderPrograms(std::vector<int32_t> const& platforms,
+                                         std::vector<ShaderSubProgram> const& programs) {
+  EncodedProgramStore store;
+  size_t const groupCount = platforms.size();
+  store.offsets.resize(groupCount);
+  store.compressedLengths.resize(groupCount);
+  store.decompressedLengths.resize(groupCount);
+
+  for (size_t group = 0; group < groupCount; group++) {
+    // Collect this group's programs, keyed by the sub-blob they belong to.
+    int32_t highestBlob = -1;
+    for (auto const& program : programs) {
+      if (static_cast<size_t>(program.groupIndex) != group) continue;
+      if (program.blobIndex < 0) {
+        store.message = "a program carries a negative blob index";
+        return store;
+      }
+      highestBlob = std::max(highestBlob, program.blobIndex);
+    }
+    if (highestBlob < 0) continue;  // a platform with no programs keeps an empty group
+
+    for (int32_t blobIndex = 0; blobIndex <= highestBlob; blobIndex++) {
+      std::vector<ShaderSubProgram const*> members;
+      for (auto const& program : programs) {
+        if (static_cast<size_t>(program.groupIndex) == group && program.blobIndex == blobIndex) {
+          members.push_back(&program);
+        }
+      }
+      if (members.empty()) {
+        store.message = "sub-blob " + std::to_string(blobIndex) + " of platform group " +
+                        std::to_string(group) + " has no programs, so the store would have a hole";
+        return store;
+      }
+      std::stable_sort(members.begin(), members.end(),
+                       [](ShaderSubProgram const* a, ShaderSubProgram const* b) {
+                         return a->programIndex < b->programIndex;
+                       });
+
+      // The entry width is whatever the sub-blob was read with, so a file that
+      // used 12-byte entries keeps using them.
+      size_t const entrySize = members.front()->entrySize == 12 ? 12u : 8u;
+
+      std::vector<std::vector<uint8_t>> bodies;
+      bodies.reserve(members.size());
+      for (auto const* program : members) {
+        std::vector<uint8_t> body;
+        WriteSubProgram(*program, body);
+        bodies.push_back(std::move(body));
+      }
+
+      size_t const headerSize = 4 + members.size() * entrySize;
+      std::vector<uint8_t> plain;
+      plain.reserve(headerSize);
+      auto putU32 = [&plain](uint32_t value) {
+        plain.push_back(static_cast<uint8_t>(value & 0xff));
+        plain.push_back(static_cast<uint8_t>((value >> 8) & 0xff));
+        plain.push_back(static_cast<uint8_t>((value >> 16) & 0xff));
+        plain.push_back(static_cast<uint8_t>((value >> 24) & 0xff));
+      };
+      putU32(static_cast<uint32_t>(members.size()));
+      size_t cursor = headerSize;
+      for (auto const& body : bodies) {
+        putU32(static_cast<uint32_t>(cursor));
+        putU32(static_cast<uint32_t>(body.size()));
+        if (entrySize == 12) putU32(0);
+        cursor += body.size();
+      }
+      for (auto const& body : bodies) plain.insert(plain.end(), body.begin(), body.end());
+
+      std::vector<uint8_t> packed(Lz4CompressBound(plain.size()));
+      size_t const written =
+          Lz4CompressBlock(plain.data(), plain.size(), packed.data(), packed.size());
+      if (written == 0) {
+        store.message = "a sub-blob could not be compressed";
+        return store;
+      }
+
+      store.offsets[group].push_back(static_cast<int32_t>(store.blob.size()));
+      store.compressedLengths[group].push_back(static_cast<int32_t>(written));
+      store.decompressedLengths[group].push_back(static_cast<int32_t>(plain.size()));
+      store.blob.insert(store.blob.end(), packed.begin(), packed.begin() + static_cast<long>(written));
+    }
+  }
+
+  store.ok = true;
+  return store;
+}
 
 DecodeResult DecodeShaderPrograms(uint8_t const* data, size_t size, ShaderObject const& shader) {
   DecodeResult result;
@@ -628,13 +878,16 @@ DecodeResult DecodeShaderPrograms(uint8_t const* data, size_t size, ShaderObject
       plain.resize(written);
 
       std::vector<std::pair<uint32_t, uint32_t>> table;
-      if (!ReadProgramTable(plain.data(), plain.size(), table)) { failed++; continue; }
+      int32_t entryWidth = 8;
+      if (!ReadProgramTable(plain.data(), plain.size(), table, entryWidth)) { failed++; continue; }
 
       for (size_t i = 0; i < table.size(); i++) {
         ShaderSubProgram program;
         program.platform = platform;
+        program.groupIndex = static_cast<int32_t>(group);
         program.blobIndex = static_cast<int32_t>(entry);
         program.programIndex = static_cast<int32_t>(i);
+        program.entrySize = entryWidth;
         if (!ReadSubProgram(plain.data() + table[i].first, table[i].second, program)) {
           failed++;
           continue;
