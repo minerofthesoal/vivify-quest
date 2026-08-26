@@ -86,7 +86,8 @@ private:
   static void OnCustomEventStatic(GlobalNamespace::BeatmapCallbacksController* callbackController,
                                   CustomJSONData::CustomEventData* customEventData);
   void EnsureBehaviour();
-  void ResetRuntime();
+  // reason ends up verbatim in VivifyReport.txt, so callers say what happened.
+  void ResetRuntime(std::string_view reason = "level ended (quit or finished)");
   float CurrentSongTime();
   void DetectSongRestart();
   float CurrentBpm() const;
@@ -115,11 +116,15 @@ private:
   void CacheBundleAssets();
   // True once the watchdog has stood Vivify down for this level.
   bool SelfDisabled() const { return _selfDisabledThisLevel; }
+  // Formats everything gathered about the current level for VivifyReport.txt.
+  std::string BuildLevelReport(std::string_view outcome) const;
+  void WriteLevelStartReport();
+  void WriteLevelEndReport(std::string_view outcome);
   // Reports, per bundle, how many shaders can actually draw here and why the
   // rest cannot -- separating "no Android program was ever compiled" from
   // "this GPU refuses every subshader", which need completely different fixes.
   void LogBundleShaderAudit(int seen, int runnable, int noProgram, int deviceRejected,
-                            std::vector<std::string> const& deviceRejectedNames) const;
+                            std::vector<std::string> const& deviceRejectedNames);
   UnityEngine::Object* GetAssetObject(std::string_view assetName) const;
   template <typename T>
   T* GetAssetAs(std::string_view assetName) const {
@@ -265,6 +270,9 @@ private:
   void ClearAssignedPrefabs(std::string_view objectType, std::optional<AssignedPrefabKind> kind = std::nullopt,
                             std::optional<int> saberType = std::nullopt, std::vector<TrackW> const* tracks = nullptr);
   std::vector<AssignedPrefabInfo*> GetValidPrefabInfos(std::vector<AssignedPrefabInfo*> const& infos);
+  // Classifies a replacement prefab asset once and remembers the answer, so a
+  // prefab that cannot draw is not instantiated once per note for a whole song.
+  PrefabRenderability EvaluatePrefabRenderability(std::string_view asset);
   bool ShouldHideOriginal(std::vector<AssignedPrefabInfo*> const& infos) const;
   void DisableOriginalRenderers(UnityEngine::GameObject* gameObject, VisualReplacement& replacement);
   void DisableOriginalRenderers(ArrayW<UnityEngine::Renderer*, Array<UnityEngine::Renderer*>*> const& renderers,
@@ -324,6 +332,7 @@ private:
   std::unordered_map<int, SavedGlobalValue> _currentGlobalProperties;
   std::unordered_map<std::string, bool> _currentGlobalKeywords;
   std::unordered_set<UnityEngine::Material*> _repairedMaterials;
+  std::unordered_map<std::string, PrefabRenderability> _prefabRenderability;
   std::unordered_map<UnityEngine::Renderer*, int> _overlayRendererSortingOrders;
   std::unordered_map<std::string, DeclaredTextureData> _declaredTextures;
   std::unordered_map<std::string, SecondaryCameraData> _secondaryCameras;
@@ -372,6 +381,7 @@ private:
   mutable std::unordered_map<UnityEngine::Material*, bool> _blitMaterialValidCache;
   std::unordered_set<CustomJSONData::CustomEventData*> _catchUpAppliedCustomEvents;
   float _lastSongTime = -1.0f;
+  float _lastKnownSongLength = -1.0f;
   float _lastSyncSongTime = -1.0f;
   int _songTimeCacheFrame = -1;
   int _lastUpdateErrorFrame = -1000;
@@ -391,6 +401,25 @@ private:
   // the rest of the level and say so: the map loses its Vivify visuals, which
   // is bad, but the game keeps running and the log names the phase.
   bool _selfDisabledThisLevel = false;
+
+  // Everything the on-device report needs. Gathered as the level loads so that
+  // a level which then freezes still has a complete "started" block on disk --
+  // a frozen game never reaches the end-of-level write, so anything only
+  // recorded at the end would be lost exactly when it matters most.
+  std::string _graphicsSummary;
+  std::string _sourceBundleScanText;
+  double _loadMsCacheAssets = 0.0;
+  double _loadMsDecodeTextures = 0.0;
+  double _loadMsRepairShaders = 0.0;
+  double _loadMsTotal = 0.0;
+  int _auditShadersSeen = 0;
+  int _auditShadersRunnable = 0;
+  int _auditShadersNoProgram = 0;
+  int _auditShadersDeviceRejected = 0;
+  std::vector<std::string> _auditRejectedNames;
+  int _texturesDecoded = 0;
+  int _texturesSkipped = 0;
+  bool _levelReportOpen = false;
   bool _fallbackShaderSearchFailed = false;
   int _slowFrameStreak = 0;
   double _worstFrameMs = 0.0;

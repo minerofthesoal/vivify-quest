@@ -169,11 +169,28 @@ std::vector<size_t> ChildIndices(std::vector<TypeTreeNode> const& nodes, size_t 
   return children;
 }
 
-// Walks one field, advancing the reader past it. `collectInts`, when non-null,
-// receives the elements of this field if it is an array of 4-byte primitives --
-// which is how the `platforms` array is read without special-casing its layout.
+// What a walk of one named field should bring back.
+//
+// A field is described by the type tree, not by this code, so the same capture
+// serves `platforms` (vector<int>, one group), `offsets` (vector<vector<int>>,
+// one group per inner array) and `compressedBlob` (vector<UInt8>, a byte range).
+// Nothing here needs to know which of those it is looking at.
+struct FieldCapture {
+  bool wantBytes = false;
+
+  std::vector<std::vector<int32_t>> groups;  // one per int array encountered
+  bool sawBytes = false;
+  size_t byteOffset = 0;  // relative to the start of the object body
+  size_t byteCount = 0;
+
+  bool empty() const { return groups.empty() && !sawBytes; }
+};
+
+// Walks one field, advancing the reader past it. `capture`, when non-null,
+// records this field's contents -- which is how `platforms`, the three length
+// tables and the blob are all read without special-casing any of their layouts.
 void WalkNode(Reader& reader, SerializedTypeInfo const& type, size_t nodeIndex,
-              std::vector<int32_t>* collectInts, int depth) {
+              FieldCapture* capture, int depth) {
   if (!reader.ok() || nodeIndex >= type.nodes.size()) return;
   // Bundles are untrusted input; a cyclic or absurdly deep tree must not
   // recurse without bound.
@@ -197,16 +214,28 @@ void WalkNode(Reader& reader, SerializedTypeInfo const& type, size_t nodeIndex,
       // than looping, and refuse a count the remaining bytes cannot support.
       uint64_t const bytes = static_cast<uint64_t>(count) * static_cast<uint64_t>(element.byteSize);
       if (bytes > reader.remaining()) { reader.skip(reader.remaining()); return; }
-      if (collectInts != nullptr && element.byteSize == 4) {
-        collectInts->reserve(count);
-        for (uint32_t i = 0; i < count; i++) collectInts->push_back(static_cast<int32_t>(reader.u32()));
+      if (capture != nullptr && capture->wantBytes && element.byteSize == 1) {
+        // The blob is recorded as a range, not copied: it is the largest thing
+        // in the file by a wide margin.
+        capture->sawBytes = true;
+        capture->byteOffset = reader.position();
+        capture->byteCount = static_cast<size_t>(bytes);
+        reader.skip(static_cast<size_t>(bytes));
+      } else if (capture != nullptr && !capture->wantBytes && element.byteSize == 4) {
+        std::vector<int32_t> group;
+        group.reserve(count);
+        for (uint32_t i = 0; i < count; i++) group.push_back(static_cast<int32_t>(reader.u32()));
+        capture->groups.push_back(std::move(group));
       } else {
         reader.skip(static_cast<size_t>(bytes));
       }
     } else {
       if (count > reader.remaining()) { reader.skip(reader.remaining()); return; }
       for (uint32_t i = 0; i < count && reader.ok(); i++) {
-        WalkNode(reader, type, dataNode, nullptr, depth + 1);
+        // Every element of a nested array belongs to the same field, so the
+        // capture stays armed across all of them -- that is what turns
+        // vector<vector<int>> into one group per inner array.
+        WalkNode(reader, type, dataNode, capture, depth + 1);
       }
     }
   } else if (children.empty()) {
@@ -216,12 +245,16 @@ void WalkNode(Reader& reader, SerializedTypeInfo const& type, size_t nodeIndex,
     for (size_t child : children) {
       if (!reader.ok()) return;
       // A field like `platforms` is a *vector* node wrapping the actual Array
-      // node, so the collector has to be handed down through the wrapper or it
-      // would never reach the elements. Stop propagating once something has
-      // been collected, so a struct containing several int arrays cannot merge
-      // them together.
-      bool const stillLooking = collectInts != nullptr && collectInts->empty();
-      WalkNode(reader, type, child, stillLooking ? collectInts : nullptr, depth + 1);
+      // node, so the capture has to be handed down through the wrapper or it
+      // would never reach the elements. A wrapper is recognisable by having
+      // exactly one child, and always passes the capture on -- which is what
+      // lets vector<vector<int>> keep collecting past its first inner array.
+      //
+      // A real struct has several children, and there the capture stops at the
+      // first thing collected so unrelated sibling arrays cannot be merged.
+      bool const isWrapper = children.size() == 1;
+      bool const stillLooking = capture != nullptr && (isWrapper || capture->empty());
+      WalkNode(reader, type, child, stillLooking ? capture : nullptr, depth + 1);
     }
   }
 
@@ -230,16 +263,46 @@ void WalkNode(Reader& reader, SerializedTypeInfo const& type, size_t nodeIndex,
 
 // Reads a Shader object: walks its top-level fields in order, capturing the one
 // named "platforms" and the shader's name if it is reachable by name.
-ShaderObject ReadShaderObject(uint8_t const* data, size_t size, SerializedTypeInfo const& type) {
+ShaderObject ReadShaderObject(uint8_t const* data, size_t size, size_t fileOffset,
+                              SerializedTypeInfo const& type) {
   ShaderObject shader;
   if (type.nodes.empty()) return shader;
+
+  // The five fields that describe the compiled program store. Everything else
+  // in a Shader object is walked only to stay in step with the byte stream.
+  auto captureInts = [&](Reader& reader, size_t child, std::vector<std::vector<int32_t>>& into) {
+    FieldCapture capture;
+    WalkNode(reader, type, child, &capture, 1);
+    into = std::move(capture.groups);
+  };
 
   Reader reader(data, size);
   for (size_t child : ChildIndices(type.nodes, 0)) {
     if (!reader.ok()) break;
     std::string const name = NodeName(type, type.nodes[child]);
     if (name == "platforms") {
-      WalkNode(reader, type, child, &shader.platforms, 1);
+      FieldCapture capture;
+      WalkNode(reader, type, child, &capture, 1);
+      // platforms is flat, so there is exactly one group; older bundles that
+      // nest it would give several, and concatenating them is still correct.
+      for (auto const& group : capture.groups) {
+        shader.platforms.insert(shader.platforms.end(), group.begin(), group.end());
+      }
+    } else if (name == "offsets") {
+      captureInts(reader, child, shader.offsets);
+    } else if (name == "compressedLengths") {
+      captureInts(reader, child, shader.compressedLengths);
+    } else if (name == "decompressedLengths") {
+      captureInts(reader, child, shader.decompressedLengths);
+    } else if (name == "compressedBlob") {
+      FieldCapture capture;
+      capture.wantBytes = true;
+      WalkNode(reader, type, child, &capture, 1);
+      if (capture.sawBytes) {
+        shader.blobPresent = true;
+        shader.blobFileOffset = fileOffset + capture.byteOffset;
+        shader.blobSize = capture.byteCount;
+      }
     } else {
       size_t const before = reader.position();
       WalkNode(reader, type, child, nullptr, 1);
@@ -286,6 +349,288 @@ std::string_view ShaderPlatformName(int32_t platform) {
     case 23: return "PS5";
     default: return "unknown";
   }
+}
+
+std::string_view GpuProgramTypeName(int32_t programType) {
+  switch (programType) {
+    case kGpuProgramGLLegacy: return "GL legacy";
+    case kGpuProgramGLES31AEP: return "GLES 3.1 AEP";
+    case kGpuProgramGLES31: return "GLES 3.1";
+    case kGpuProgramGLES3: return "GLES 3.0";
+    case kGpuProgramGLES: return "GLES 2.0";
+    case kGpuProgramGLCore32: return "GL core 3.2";
+    case kGpuProgramGLCore41: return "GL core 4.1";
+    case kGpuProgramGLCore43: return "GL core 4.3";
+    case kGpuProgramDX11VertexSM40: return "D3D11 vertex sm4.0";
+    case kGpuProgramDX11VertexSM50: return "D3D11 vertex sm5.0";
+    case kGpuProgramDX11PixelSM40: return "D3D11 pixel sm4.0";
+    case kGpuProgramDX11PixelSM50: return "D3D11 pixel sm5.0";
+    case kGpuProgramDX11GeometrySM40: return "D3D11 geometry sm4.0";
+    case kGpuProgramDX11GeometrySM50: return "D3D11 geometry sm5.0";
+    case kGpuProgramDX11HullSM50: return "D3D11 hull sm5.0";
+    case kGpuProgramDX11DomainSM50: return "D3D11 domain sm5.0";
+    case kGpuProgramMetalVS: return "Metal vertex";
+    case kGpuProgramMetalFS: return "Metal fragment";
+    case kGpuProgramSPIRV: return "SPIR-V";
+    default: return "unknown";
+  }
+}
+
+bool GpuProgramIsGlslSource(int32_t programType) {
+  switch (programType) {
+    case kGpuProgramGLLegacy:
+    case kGpuProgramGLES31AEP:
+    case kGpuProgramGLES31:
+    case kGpuProgramGLES3:
+    case kGpuProgramGLES:
+    case kGpuProgramGLCore32:
+    case kGpuProgramGLCore41:
+    case kGpuProgramGLCore43:
+      return true;
+    default:
+      return false;
+  }
+}
+
+// LZ4 block format, decompression only.
+//
+// A block is a sequence of: one token byte, high nibble = literal length, low
+// nibble = match length - 4; optional length-extension bytes for either nibble
+// (0xf means "add the following bytes until one is not 0xff"); the literals
+// themselves; then a 2-byte little-endian offset back into the output followed
+// by the match. The final sequence ends after its literals with no match.
+//
+// Written out here rather than pulled in as a dependency: it is small, it has
+// to run inside a Beat Saber mod on a headset, and it is fed untrusted bundle
+// bytes, so every read and write is bounds-checked against the two buffers.
+size_t Lz4DecodeBlock(uint8_t const* src, size_t srcSize, uint8_t* dst, size_t dstCapacity) {
+  if (src == nullptr || dst == nullptr) return 0;
+  size_t sp = 0;
+  size_t dp = 0;
+
+  while (sp < srcSize) {
+    uint8_t const token = src[sp++];
+
+    size_t literalLength = token >> 4;
+    if (literalLength == 15) {
+      while (true) {
+        if (sp >= srcSize) return 0;
+        uint8_t const add = src[sp++];
+        literalLength += add;
+        if (add != 0xff) break;
+        // A run of 0xff bytes could otherwise be used to overflow the length.
+        if (literalLength > dstCapacity) return 0;
+      }
+    }
+    if (literalLength > srcSize - sp) return 0;
+    if (literalLength > dstCapacity - dp) return 0;
+    std::memcpy(dst + dp, src + sp, literalLength);
+    sp += literalLength;
+    dp += literalLength;
+
+    // The last sequence stops here: no offset follows its literals.
+    if (sp == srcSize) break;
+    if (srcSize - sp < 2) return 0;
+    size_t const offset = static_cast<size_t>(src[sp]) | (static_cast<size_t>(src[sp + 1]) << 8);
+    sp += 2;
+    if (offset == 0 || offset > dp) return 0;
+
+    size_t matchLength = static_cast<size_t>(token & 0x0f);
+    if (matchLength == 15) {
+      while (true) {
+        if (sp >= srcSize) return 0;
+        uint8_t const add = src[sp++];
+        matchLength += add;
+        if (add != 0xff) break;
+        if (matchLength > dstCapacity) return 0;
+      }
+    }
+    matchLength += 4;
+    if (matchLength > dstCapacity - dp) return 0;
+
+    // Overlapping matches are legal and common (offset 1 means "repeat the last
+    // byte"), so this copies forward one byte at a time rather than memmove.
+    size_t from = dp - offset;
+    for (size_t i = 0; i < matchLength; i++) dst[dp++] = dst[from++];
+  }
+  return dp;
+}
+
+namespace {
+
+// Reads the [offset, length] table at the start of a decompressed sub-blob.
+//
+// Unity has used both 8-byte and 12-byte entries here depending on version. The
+// entry size is worked out from the data rather than from a version rule: only
+// one of the two lays every program inside the blob and clear of the table
+// itself, so the layout is checked instead of assumed.
+bool ReadProgramTable(uint8_t const* blob, size_t blobSize,
+                      std::vector<std::pair<uint32_t, uint32_t>>& out) {
+  if (blobSize < 4) return false;
+  auto readU32 = [blob](size_t at) {
+    return static_cast<uint32_t>(blob[at]) | (static_cast<uint32_t>(blob[at + 1]) << 8) |
+           (static_cast<uint32_t>(blob[at + 2]) << 16) | (static_cast<uint32_t>(blob[at + 3]) << 24);
+  };
+
+  uint32_t const count = readU32(0);
+  // A count large enough to overflow the header would be rejected below anyway,
+  // but bail early rather than sizing a vector from a hostile number.
+  if (count > blobSize / 8) return false;
+
+  for (size_t entrySize : {size_t(8), size_t(12)}) {
+    size_t const header = 4 + static_cast<size_t>(count) * entrySize;
+    if (header > blobSize) continue;
+
+    std::vector<std::pair<uint32_t, uint32_t>> candidate;
+    candidate.reserve(count);
+    bool good = true;
+    for (uint32_t i = 0; i < count && good; i++) {
+      size_t const at = 4 + static_cast<size_t>(i) * entrySize;
+      uint32_t const offset = readU32(at);
+      uint32_t const length = readU32(at + 4);
+      if (offset < header || length == 0) { good = false; break; }
+      if (offset > blobSize || length > blobSize - offset) { good = false; break; }
+      candidate.emplace_back(offset, length);
+    }
+    if (good) {
+      out = std::move(candidate);
+      return true;
+    }
+  }
+  return false;
+}
+
+// Parses one compiled sub-program's header.
+//
+// Layout, as Unity writes it: format version, ShaderGpuProgramType, three ints
+// of statistics, a fourth int from 2016.08 onwards, then the keyword table as
+// aligned strings, then the program bytes as a byte array.
+bool ReadSubProgram(uint8_t const* data, size_t size, ShaderSubProgram& out) {
+  Reader reader(data, size);
+  out.blobVersion = static_cast<int32_t>(reader.u32());
+  out.programType = static_cast<int32_t>(reader.u32());
+  reader.skip(12);
+  if (out.blobVersion >= 201608170) reader.skip(4);
+  if (!reader.ok()) return false;
+
+  uint32_t const keywordCount = reader.u32();
+  if (!reader.ok() || keywordCount > reader.remaining() / 4) return false;
+  for (uint32_t i = 0; i < keywordCount; i++) {
+    uint32_t const length = reader.u32();
+    if (!reader.ok() || length > reader.remaining()) return false;
+    std::string keyword(length, '\0');
+    if (length > 0 && !reader.raw(reinterpret_cast<uint8_t*>(keyword.data()), length)) return false;
+    reader.align4();
+    out.keywords.push_back(std::move(keyword));
+  }
+
+  // 2018.06 through 2020.12 wrote a second, local keyword table in the same
+  // shape immediately after the first.
+  if (out.blobVersion >= 201806140 && out.blobVersion < 202012090) {
+    uint32_t const localCount = reader.u32();
+    if (!reader.ok() || localCount > reader.remaining() / 4) return false;
+    for (uint32_t i = 0; i < localCount; i++) {
+      uint32_t const length = reader.u32();
+      if (!reader.ok() || length > reader.remaining()) return false;
+      std::string keyword(length, '\0');
+      if (length > 0 && !reader.raw(reinterpret_cast<uint8_t*>(keyword.data()), length)) return false;
+      reader.align4();
+      out.keywords.push_back(std::move(keyword));
+    }
+  }
+
+  uint32_t const codeLength = reader.u32();
+  if (!reader.ok() || codeLength > reader.remaining()) return false;
+  out.code.resize(codeLength);
+  if (codeLength > 0 && !reader.raw(out.code.data(), codeLength)) return false;
+  return true;
+}
+
+}  // namespace
+
+DecodeResult DecodeShaderPrograms(uint8_t const* data, size_t size, ShaderObject const& shader) {
+  DecodeResult result;
+  if (data == nullptr) { result.message = "no data"; return result; }
+  if (!shader.blobPresent) { result.message = "shader carries no compressedBlob"; return result; }
+  if (shader.blobFileOffset > size || shader.blobSize > size - shader.blobFileOffset) {
+    result.message = "compressedBlob range lies outside the file";
+    return result;
+  }
+  if (shader.offsets.size() != shader.compressedLengths.size() ||
+      shader.offsets.size() != shader.decompressedLengths.size()) {
+    result.message = "offsets, compressedLengths and decompressedLengths disagree";
+    return result;
+  }
+
+  uint8_t const* const blob = data + shader.blobFileOffset;
+  size_t const blobSize = shader.blobSize;
+
+  int decoded = 0;
+  int failed = 0;
+  for (size_t group = 0; group < shader.offsets.size(); group++) {
+    // A platform per group is the 2019.3+ layout. A bundle with a single flat
+    // group and several platforms cannot say which is which, so it is reported
+    // as unknown rather than guessed at.
+    int32_t const platform = group < shader.platforms.size() ? shader.platforms[group]
+                             : shader.platforms.size() == 1 ? shader.platforms[0]
+                                                            : -1;
+    auto const& groupOffsets = shader.offsets[group];
+    auto const& groupCompressed = shader.compressedLengths[group];
+    auto const& groupDecompressed = shader.decompressedLengths[group];
+    if (groupOffsets.size() != groupCompressed.size() ||
+        groupOffsets.size() != groupDecompressed.size()) {
+      failed++;
+      continue;
+    }
+
+    for (size_t entry = 0; entry < groupOffsets.size(); entry++) {
+      int32_t const offset = groupOffsets[entry];
+      int32_t const compressed = groupCompressed[entry];
+      int32_t const decompressedSize = groupDecompressed[entry];
+      if (offset < 0 || compressed <= 0 || decompressedSize <= 0) { failed++; continue; }
+      if (static_cast<size_t>(offset) > blobSize ||
+          static_cast<size_t>(compressed) > blobSize - static_cast<size_t>(offset)) {
+        failed++;
+        continue;
+      }
+      // A decompressed size a bundle claims is an allocation this code is about
+      // to make on a headset, so it is capped rather than trusted.
+      if (decompressedSize > 64 * 1024 * 1024) { failed++; continue; }
+
+      std::vector<uint8_t> plain(static_cast<size_t>(decompressedSize));
+      size_t const written = Lz4DecodeBlock(blob + offset, static_cast<size_t>(compressed),
+                                            plain.data(), plain.size());
+      if (written == 0) { failed++; continue; }
+      plain.resize(written);
+
+      std::vector<std::pair<uint32_t, uint32_t>> table;
+      if (!ReadProgramTable(plain.data(), plain.size(), table)) { failed++; continue; }
+
+      for (size_t i = 0; i < table.size(); i++) {
+        ShaderSubProgram program;
+        program.platform = platform;
+        program.blobIndex = static_cast<int32_t>(entry);
+        program.programIndex = static_cast<int32_t>(i);
+        if (!ReadSubProgram(plain.data() + table[i].first, table[i].second, program)) {
+          failed++;
+          continue;
+        }
+        result.programs.push_back(std::move(program));
+        decoded++;
+      }
+    }
+  }
+
+  // Nothing decoded and nothing failed means the shader genuinely carries no
+  // programs, which is not an error. Only a shader whose sub-blobs were all
+  // unreadable is a failure.
+  result.ok = failed == 0 || decoded > 0;
+  if (!result.ok && result.message.empty()) result.message = "no programs could be decoded";
+  if (failed > 0) {
+    result.message = "decoded " + std::to_string(decoded) + " program(s); " +
+                     std::to_string(failed) + " sub-blob(s) could not be read";
+  }
+  return result;
 }
 
 bool ShaderPlatformRunsOnQuest(int32_t platform) {
@@ -433,7 +778,8 @@ FileReport InspectSerializedFile(uint8_t const* data, size_t size) {
 
     uint64_t const start = static_cast<uint64_t>(object.byteStart) + dataOffset;
     if (start >= size || object.byteSize > size - start) continue;
-    report.shaders.push_back(ReadShaderObject(data + start, object.byteSize, type));
+    report.shaders.push_back(
+        ReadShaderObject(data + start, object.byteSize, static_cast<size_t>(start), type));
   }
 
   if (!enableTypeTree && report.shaderObjectCount > 0) {

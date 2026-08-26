@@ -151,7 +151,7 @@ and repacks it uncompressed. Unity then accepts and enumerates the bundle.
 - Every path that leaves the play button disabled now names its own reason
   ("Convert failed: unsupported bundle compression", "Asset download timed
   out", "PC bundle found; enable Convert PC Bundles On Device in settings",
-  …), and level selection always logs one line to `Vivify.log` recording the
+  …), and level selection always logs one line to `VivifySession.txt` recording the
   Android bundle, PC bundle, checksum, cache path and decision taken.
 
 **Convert All PC Bundles Now.** Per-level conversion runs on level *selection*,
@@ -417,6 +417,69 @@ fixes. The forced pass removes each cached file before reconverting. Conversion
 writes through a `.part` file and renames, so a failure mid-pass leaves no
 cached bundle rather than a truncated one.
 
+## 0.9.1 — both diagnostic files are .txt, in one folder
+
+The full session log was at `Logs/Vivify.log`. A `.log` file has no default
+handler on Android or Windows, so tapping it does nothing and it looks like no
+log exists at all -- and it lived in a different directory from the per-level
+report, so there were two places to look. Both files are now plain `.txt` in the
+mod's own folder, and both paths are shown in the settings menu:
+
+```
+/sdcard/ModData/com.beatgames.beatsaber/Mods/Vivify/VivifyReport.txt    per-level report
+/sdcard/ModData/com.beatgames.beatsaber/Mods/Vivify/VivifySession.txt   full session log
+```
+
+Two things about the session log were worth fixing while renaming it:
+
+- **It flushed on every line.** That is an sdcard write per log line, on
+  whichever thread logged -- including the main thread during gameplay, where
+  Vivify can be noisy. Warnings and errors still flush immediately, since those
+  are the lines that matter if the game stops before the buffer reaches disk;
+  ordinary lines are now flushed at most a few times a second.
+- **It had no size limit.** Capped at 8MB per session, after which lines go to
+  logcat only and the file says so. It is truncated at launch, so this only has
+  to bound a single play session.
+
+## 0.9.0 — a report file you can actually find
+
+paperlog output lives where a player cannot reach it without adb, so "send me
+the log" was never a reasonable thing to ask. Vivify now writes its own
+plain-text report to a fixed path under its own data directory, visible to any
+file browser or over MTP:
+
+```
+/sdcard/ModData/com.beatgames.beatsaber/Mods/Vivify/VivifyReport.txt
+```
+
+The path is also shown in the Vivify settings menu.
+
+**Two blocks per level.** One when the level starts, one when it ends. The
+start block is written at load, before gameplay, *specifically* so that a level
+which then freezes still leaves its diagnostics on disk — a frozen game never
+reaches the end-of-level write, so anything recorded only at the end would be
+lost exactly when it matters most.
+
+Each block carries the mod version, the graphics API and GPU name, the level
+and bundle paths, whether the bundle was converted, the main-thread level-load
+timings, the frame watchdog's worst frame and whether it stood down, the shader
+audit (how many shaders are runnable, DirectX-only, or refused by this GPU, with
+the refused ones named), shader-repair counts, texture decode counts, and the
+source bundle's shader platforms.
+
+The end block records why the level ended — quit or finished, song restarted, or
+left — along with how far into the song it got. It reports the song position
+rather than guessing "quit" versus "beaten", because by the time the reset runs
+the `AudioTimeSyncController` is usually already gone.
+
+The file is capped at 512KB and trimmed to the newest 256KB on a line boundary,
+so leaving the mod installed cannot fill a headset. A write failure is swallowed
+entirely: a diagnostic file must never be the reason the game breaks.
+
+Covered by `tools/report/` — missing directories, appending rather than
+overwriting, bodies without trailing newlines, the size cap and its trim notice,
+and an unwritable path that must not throw. Ten checks under ASan/UBSan.
+
 ## Converting shaders PC -> Quest
 
 Earlier versions of this README said conversion "cannot translate" DirectX
@@ -436,9 +499,33 @@ exists today:
 1. **Locate and decode Shader assets in the bundle.** Done --
    `VivifySerializedFile.cpp` parses the SerializedFile object table and walks
    Shader objects through the embedded type tree. Covered by `tools/shaderscan/`.
-2. **Decode Unity's shader blob**: LZ4-decompress `compressedBlob`, split it per
-   sub-program using `offsets`/`compressedLengths`, and parse each program's
-   Unity-specific header and reflection tables.
+2. **Decode Unity's shader blob.** Done -- `DecodeShaderPrograms` in
+   `VivifySerializedFile.cpp`. `offsets`/`compressedLengths`/
+   `decompressedLengths` are read out of the type tree as the nested tables
+   Unity 2019.3+ writes (one group per platform), each sub-blob is
+   LZ4-decompressed, and its `[offset, length]` program table is split into
+   individual sub-programs -- format version, `ShaderGpuProgramType`, keyword
+   tables and program bytes.
+
+   The LZ4 block decoder is written out here rather than vendored: it is small,
+   it runs on a headset, and it is fed untrusted bundle bytes, so every read and
+   write is bounds-checked. Unity has used both 8-byte and 12-byte program-table
+   entries; the entry size is determined from the data (only one of the two lays
+   every program inside the blob and clear of the table) rather than from a
+   version rule.
+
+   This is also where the size of step 3 gets settled per bundle, because the
+   scan now reports what the programs *are*:
+
+   ```
+   Vivify source bundle shaders: unity=2021.3.16f1 serializedFiles=1 shaders=24
+     runnableOnQuest=0 platforms=[Direct3D 11(4)] programs=61 glslSource=0
+     binary=61 programTypes=[D3D11 vertex sm5.0, D3D11 pixel sm5.0]
+   ```
+
+   `glslSource` counts programs stored as GLSL text, which are writable by
+   string manipulation. `binary` counts the ones that need a real
+   cross-compiler.
 3. **Cross-compile** each DXBC program to GLSL ES 3.x (or to SPIR-V via glslang,
    under Vulkan), which means vendoring HLSLcc -- roughly 30k lines of C++ --
    into an ARM64 Android mod.

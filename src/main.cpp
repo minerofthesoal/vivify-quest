@@ -1,8 +1,10 @@
 #include "main.hpp"
 #include "VivifyRuntime.hpp"
+#include "VivifyReport.hpp"
 #include <string>
 #include <string_view>
 #include <fstream>
+#include <chrono>
 #include <mutex>
 #include <filesystem>
 #include "HMUI/ViewController.hpp"
@@ -57,11 +59,25 @@ bool gConvertPcBundlesOnDevice = true;
 // notes and sabers keep the game's own visuals rather than a white stand-in.
 bool gStandInShading = true;
 
-constexpr std::string_view kVivifyLogDir = "/sdcard/ModData/com.beatgames.beatsaber/Logs";
-constexpr std::string_view kVivifyLogPath = "/sdcard/ModData/com.beatgames.beatsaber/Logs/Vivify.log";
+// Both diagnostic files live beside the mod's own data, and both are .txt.
+//
+// This used to be Logs/Vivify.log. A .log file has no default handler on Android
+// or Windows, so tapping it does nothing and it looks like no log exists at all
+// -- and it sat in a different directory from the per-level report, so there
+// were two places to look. One directory, two .txt files, both openable.
+constexpr std::string_view kVivifyLogDir = "/sdcard/ModData/com.beatgames.beatsaber/Mods/Vivify";
+constexpr std::string_view kVivifyLogPath =
+    "/sdcard/ModData/com.beatgames.beatsaber/Mods/Vivify/VivifySession.txt";
+
+// A session log must not fill a headset, and it is truncated at launch anyway,
+// so this only has to bound one play session.
+constexpr std::streamoff kVivifyLogMaxBytes = 8 * 1024 * 1024;
+
 std::ofstream gVivifyLogFile;
 std::mutex gVivifyLogMutex;
 bool gVivifyLogSinkInstalled = false;
+bool gVivifyLogCapped = false;
+std::chrono::steady_clock::time_point gVivifyLogLastFlush{};
 
 void InstallVivifyFileLogSink() {
   if (gVivifyLogSinkInstalled) return;
@@ -76,13 +92,34 @@ void InstallVivifyFileLogSink() {
   }
   gVivifyLogFile << "=== Vivify " << VERSION << " session log ===\n";
   gVivifyLogFile.flush();
+  gVivifyLogLastFlush = std::chrono::steady_clock::now();
 
   Paper::Logger::AddLogSink([](Paper::LogData const& data) {
     if (!data.tag.has_value() || *data.tag != std::string_view(MOD_ID)) return;
     std::lock_guard<std::mutex> lock(gVivifyLogMutex);
-    if (!gVivifyLogFile.is_open()) return;
+    if (!gVivifyLogFile.is_open() || gVivifyLogCapped) return;
+
     gVivifyLogFile << '[' << Paper::format_as(data.level) << "] " << data.message << '\n';
-    gVivifyLogFile.flush();
+
+    if (gVivifyLogFile.tellp() > kVivifyLogMaxBytes) {
+      gVivifyLogFile << "=== log capped at " << (kVivifyLogMaxBytes / (1024 * 1024))
+                     << "MB; further lines go to logcat only ===\n";
+      gVivifyLogFile.flush();
+      gVivifyLogCapped = true;
+      return;
+    }
+
+    // Flushing every line meant an sdcard write per log line, on whichever
+    // thread logged -- including the main thread mid-gameplay, where Vivify can
+    // be noisy. Warnings and errors still flush immediately, because those are
+    // the lines that matter if the game stops before the buffer is written;
+    // ordinary lines are flushed at most a few times a second.
+    auto const now = std::chrono::steady_clock::now();
+    bool const important = data.level >= Paper::LogLevel::WRN;
+    if (important || now - gVivifyLogLastFlush > std::chrono::milliseconds(250)) {
+      gVivifyLogFile.flush();
+      gVivifyLogLastFlush = now;
+    }
   });
 }
 
@@ -211,6 +248,18 @@ void RegisterModSettings() {
         BSML::Lite::CreateUIButton(
             container->get_transform(), u"Force Reconvert All (ignore cache)",
             []() { startConversion(true); });
+
+        // paperlog output is not reachable without adb, so Vivify writes its own
+        // plain-text report next to its data. Showing the path here means the
+        // file can be found without being told where to look.
+        BSML::Lite::CreateText(container->get_transform(),
+                               u"Diagnostics (both plain .txt, same folder):");
+        BSML::Lite::CreateText(
+            container->get_transform(),
+            StringW("<size=70%>" + Vivify::Report::FilePath() + "</size>"));
+        BSML::Lite::CreateText(
+            container->get_transform(),
+            StringW("<size=70%>" + std::string(kVivifyLogPath) + "</size>"));
       },
       "Vivify", false);
 }

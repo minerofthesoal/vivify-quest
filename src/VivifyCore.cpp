@@ -129,7 +129,7 @@ void Runtime::Update() {
     CheckDownloadTimeout();
     UpdateSyncedObjects();
     if (_audioTimeSyncController != nullptr && !UnityEngine::Object::op_Implicit_bool(_audioTimeSyncController)) {
-      ResetRuntime();
+      ResetRuntime("level ended (quit or finished)");
 
       _activeSabers.clear();
       return;
@@ -199,10 +199,13 @@ void Runtime::DetectSongRestart() {
   if (_currentBeatmapData == nullptr || _isResetting) return;
   float songTime = CurrentSongTime();
   if (_lastSongTime >= 0.0f && songTime + 0.25f < _lastSongTime) {
-    ResetRuntime();
+    ResetRuntime("song restarted");
     return;
   }
   _lastSongTime = songTime;
+  if (IsManagedAlive(_audioTimeSyncController)) {
+    _lastKnownSongLength = _audioTimeSyncController->get_songLength();
+  }
 }
 
 float Runtime::CurrentBpm() const {
@@ -463,7 +466,21 @@ void Runtime::RefreshIsolationSettings() {
   RefreshCameraComponents(_currentBeatmapData != nullptr && !_isResetting && !_pauseMenuActive);
 }
 
-void Runtime::ResetRuntime() {
+void Runtime::ResetRuntime(std::string_view reason) {
+  // Written before anything is torn down, while the numbers are still valid.
+  // The song position is included rather than a guess at "quit" vs "beaten":
+  // by the time this runs the AudioTimeSyncController is usually already gone,
+  // so the honest thing is to report how far the song got and let that say.
+  if (_levelReportOpen) {
+    std::string outcome(reason);
+    if (_lastSongTime >= 0.0f) {
+      outcome += fmt::format("  (reached {:.1f}s", _lastSongTime);
+      outcome += _lastKnownSongLength > 0.0f ? fmt::format(" of {:.1f}s)", _lastKnownSongLength)
+                                             : std::string(")");
+    }
+    WriteLevelEndReport(outcome);
+  }
+
   VIVIFY_DEBUG("Vivify ResetRuntime: livePrefabs={} preloaded={} synced={} secondaryCameras={} declaredTextures={} assets={}",
                _livePrefabs.size(), _instantiatePrefabs.size(), _syncedObjects.size(),
                _secondaryCameras.size(), _declaredTextures.size(), _assets.size());
@@ -514,6 +531,7 @@ void Runtime::ResetRuntime() {
   _currentGlobalProperties.clear();
   _currentGlobalKeywords.clear();
   _repairedMaterials.clear();
+  _prefabRenderability.clear();
   _fallbackShadedMaterials.clear();
   // A new beatmap gets a fresh chance: the watchdog is per level, not permanent.
   _selfDisabledThisLevel = false;

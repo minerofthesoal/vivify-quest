@@ -1048,6 +1048,7 @@ ShaderScan ScanShaders(std::string const& bundlePath) {
   }
 
   std::set<int32_t> platforms;
+  std::set<int32_t> programTypes;
   for (auto const& node : nodes) {
     if (node.offset >= data.size()) continue;
     size_t const available = static_cast<size_t>(
@@ -1066,12 +1067,30 @@ ShaderScan ScanShaders(std::string const& bundlePath) {
         if (SerializedFileParse::ShaderPlatformRunsOnQuest(platform)) runsHere = true;
       }
       if (runsHere) scan.shadersRunnableOnQuest++;
+
+      // Decompress and split the shader's program store. This is what turns
+      // "the platform field says Direct3D" into "here are the N programs, and
+      // here is what each one is" -- the difference between knowing conversion
+      // is needed and being able to do it.
+      auto decoded = SerializedFileParse::DecodeShaderPrograms(
+          data.data() + node.offset, available, shader);
+      if (!decoded.ok) scan.undecodableShaders++;
+      for (auto const& program : decoded.programs) {
+        scan.programs++;
+        programTypes.insert(program.programType);
+        if (SerializedFileParse::GpuProgramIsGlslSource(program.programType)) {
+          scan.glslSourcePrograms++;
+        } else {
+          scan.binaryPrograms++;
+        }
+      }
     }
     if (scan.message.empty() && !file.message.empty()) scan.message = file.message;
   }
 
   scan.parsed = scan.serializedFiles > 0;
   scan.platforms.assign(platforms.begin(), platforms.end());
+  scan.programTypes.assign(programTypes.begin(), programTypes.end());
   if (!scan.parsed && scan.message.empty()) {
     scan.message = "no SerializedFile found inside the archive";
   }
@@ -1091,6 +1110,20 @@ std::string DescribeShaderScan(ShaderScan const& scan) {
             std::to_string(scan.platforms[i]) + ")";
   }
   text += "]";
+  text += " programs=" + std::to_string(scan.programs) +
+          " glslSource=" + std::to_string(scan.glslSourcePrograms) +
+          " binary=" + std::to_string(scan.binaryPrograms);
+  if (!scan.programTypes.empty()) {
+    text += " programTypes=[";
+    for (size_t i = 0; i < scan.programTypes.size(); i++) {
+      if (i != 0) text += ", ";
+      text += std::string(SerializedFileParse::GpuProgramTypeName(scan.programTypes[i]));
+    }
+    text += "]";
+  }
+  if (scan.undecodableShaders > 0) {
+    text += " undecodableShaders=" + std::to_string(scan.undecodableShaders);
+  }
   if (scan.typeTreeStripped) text += " typeTree=stripped";
   if (!scan.message.empty()) text += " note='" + scan.message + "'";
   return text;
