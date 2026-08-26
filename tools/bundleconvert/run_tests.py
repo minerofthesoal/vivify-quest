@@ -141,5 +141,69 @@ if not os.path.exists(os.path.join(TMP, "bad.out")):
 else:
     print("FAIL stale output file left behind"); fails += 1
 
+# --- the step-4 rewrite path (conv --repack) ---------------------------------
+#
+# RepackBundle unpacks a bundle, rebuilds every SerializedFile inside it through
+# the rewriter, and repacks it. With no shader edits the payload must come back
+# exactly as it went in: a resized object is the whole point of the rewriter,
+# and if the no-op case does not round-trip then nothing built on it can be
+# trusted with a real bundle.
+
+def repack_case(name, **kw):
+    global fails, cases
+    cases += 1
+    src = os.path.join(TMP, "rp_src.vivify")
+    dst = os.path.join(TMP, "rp_dst.vivify")
+    if os.path.exists(dst):
+        os.remove(dst)
+    orig, nodes = build(src, **kw)
+    proc = subprocess.run([CONV, "--repack", src, dst], capture_output=True, text=True)
+    status = ""
+    for line in proc.stdout.splitlines():
+        if line.startswith("status="):
+            status = line[len("status="):]
+    if status != "converted":
+        print(f"FAIL {name}: repack status '{status}'\n{proc.stdout}{proc.stderr}")
+        fails += 1
+        return
+    try:
+        version, uver, urev, cnodes, cdata = read_converted(dst)
+    except Exception as e:
+        print(f"FAIL {name}: repacked bundle did not parse: {e}")
+        fails += 1
+        return
+    problems = []
+    if [n[3] for n in cnodes] != [n[3] for n in nodes]:
+        problems.append("node paths changed")
+    if [(n[0], n[1], n[2]) for n in cnodes] != [(n[0], n[1], n[2]) for n in nodes]:
+        problems.append(f"node offsets/sizes changed: {[(n[0], n[1]) for n in cnodes]} != "
+                        f"{[(n[0], n[1]) for n in nodes]}")
+    if cdata != orig:
+        problems.append(f"payload changed ({len(cdata)} vs {len(orig)} bytes)")
+    if problems:
+        print(f"FAIL {name}: " + "; ".join(problems))
+        fails += 1
+    else:
+        print(f"ok   {name}")
+
+
+repack_case("repack round-trips the payload byte for byte")
+repack_case("repack round-trips SerializedFile v22", sf_version=22)
+repack_case("repack round-trips several files and blocks",
+            n_files=5, payload=60000, block_size=0x2000)
+repack_case("repack round-trips a bundle with no resource node",
+            n_files=1, with_resource=False)
+repack_case("repack round-trips an lz4-compressed source",
+            compression=2, block_compression=2)
+repack_case("repack round-trips an already-Android bundle", target=ANDROID)
+
+cases += 1
+p = subprocess.run([CONV, "--repack", bad, os.path.join(TMP, "rp_bad.out")],
+                   capture_output=True, text=True)
+if p.returncode != 0 and not os.path.exists(os.path.join(TMP, "rp_bad.out")):
+    print("ok   repack rejects a non-bundle without leaving output")
+else:
+    print("FAIL repack accepted a non-bundle:\n" + p.stdout); fails += 1
+
 print(f"\n{cases - fails}/{cases} passed")
 sys.exit(1 if fails else 0)

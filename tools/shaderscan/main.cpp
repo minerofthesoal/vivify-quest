@@ -36,13 +36,49 @@ int main(int argc, char** argv) {
     std::printf("lz4Out=%s\n", text.c_str());
     return written > 0 ? 0 : 1;
   }
-  std::ifstream stream(argv[1], std::ios::binary);
+  // Rewrite mode: --rewrite <file> <out> [pathID=hexbytes ...]
+  //
+  // Prints what the rewritten file parses back as, so run_tests.py can check
+  // that objects survived, moved correctly, and kept their identity.
+  bool const rewriting = std::string(argv[1]) == "--rewrite";
+  int const fileArg = rewriting ? 2 : 1;
+  if (rewriting && argc < 4) return 2;
+
+  std::ifstream stream(argv[fileArg], std::ios::binary);
   if (!stream) {
-    std::fprintf(stderr, "cannot open %s\n", argv[1]);
+    std::fprintf(stderr, "cannot open %s\n", argv[fileArg]);
     return 2;
   }
   std::vector<uint8_t> data((std::istreambuf_iterator<char>(stream)),
                             std::istreambuf_iterator<char>());
+
+  if (rewriting) {
+    std::vector<SerializedFileParse::ObjectEdit> edits;
+    for (int i = 4; i < argc; i++) {
+      std::string const spec = argv[i];
+      auto const split = spec.find('=');
+      if (split == std::string::npos) return 2;
+      SerializedFileParse::ObjectEdit edit;
+      edit.pathID = std::atoll(spec.substr(0, split).c_str());
+      std::string const hex = spec.substr(split + 1);
+      for (size_t at = 0; at + 1 < hex.size(); at += 2) {
+        edit.body.push_back(static_cast<uint8_t>(std::stoul(hex.substr(at, 2), nullptr, 16)));
+      }
+      edits.push_back(std::move(edit));
+    }
+
+    auto rewritten = SerializedFileParse::RewriteSerializedFile(data.data(), data.size(), edits);
+    std::printf("rewriteOk=%d\n", rewritten.ok ? 1 : 0);
+    if (!rewritten.message.empty()) std::printf("rewriteMessage=%s\n", rewritten.message.c_str());
+    if (!rewritten.ok) return 1;
+    std::printf("rewriteSize=%zu\n", rewritten.data.size());
+    std::printf("identical=%d\n", rewritten.data == data ? 1 : 0);
+    std::ofstream out(argv[3], std::ios::binary | std::ios::trunc);
+    out.write(reinterpret_cast<char const*>(rewritten.data.data()),
+              static_cast<std::streamsize>(rewritten.data.size()));
+    if (!out.good()) return 2;
+    data = std::move(rewritten.data);
+  }
 
   auto report = SerializedFileParse::InspectSerializedFile(data.data(), data.size());
   std::printf("isSerializedFile=%d\n", report.isSerializedFile ? 1 : 0);
@@ -52,6 +88,7 @@ int main(int argc, char** argv) {
   std::printf("objects=%d\n", report.objectCount);
   std::printf("shaderObjects=%d\n", report.shaderObjectCount);
   for (auto const& shader : report.shaders) {
+    std::printf("pathID=%lld\n", static_cast<long long>(shader.pathID));
     std::printf("shader=%s platforms=", shader.name.c_str());
     for (size_t i = 0; i < shader.platforms.size(); i++) {
       std::printf("%s%d", i ? "," : "", shader.platforms[i]);

@@ -529,13 +529,29 @@ exists today:
 3. **Cross-compile** each DXBC program to GLSL ES 3.x (or to SPIR-V via glslang,
    under Vulkan), which means vendoring HLSLcc -- roughly 30k lines of C++ --
    into an ARM64 Android mod.
-4. **Re-serialize**: rewrite `platforms`, re-encode the blob, and then fix every
-   object offset in the SerializedFile, because the Shader object's size changes
-   and the object table stores absolute byte offsets.
+4. **Re-serialize.** Done, both halves.
 
-Step 4 is what makes this more than a cross-compiler bolt-on: the converter
-today rewrites a single `int32` in place and never changes any object's size.
-Rewriting shaders means rebuilding the whole serialized file.
+   `RewriteSerializedFile` rebuilds one file with objects' bodies replaced. The
+   metadata is copied verbatim -- type tree, externals, script types, user
+   information, padding -- and only the object table's `byteStart`/`byteSize`
+   fields are patched, because nothing about an object's *body* changes any of
+   the rest. Anything the parser does not understand survives untouched, and a
+   file whose object table is empty or unfamiliar keeps its whole payload rather
+   than rebuilding to nothing.
+
+   `ReplaceNodeData` does the same one level out: a SerializedFile that changes
+   length moves every archive node stored after it, and the directory table
+   records absolute offsets into the unpacked data.
+
+   Both preserve the gaps around what they move, so a rewrite with no edits
+   reproduces its input byte for byte -- which is the only property that can be
+   checked before there is a real converted shader to write. `conv --repack`
+   runs a whole bundle through the path and the tests require the payload back
+   unchanged.
+
+Step 3 is now the only one left. It is also the largest: vendoring HLSLcc into
+an ARM64 Android mod, and nothing in it can be verified without a Quest and real
+maps.
 
 None of this can be verified without a Quest and real maps, and a half-correct
 implementation would corrupt bundles that currently load and render with
