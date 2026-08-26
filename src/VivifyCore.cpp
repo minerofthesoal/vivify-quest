@@ -531,6 +531,7 @@ void Runtime::ResetRuntime(std::string_view reason) {
   _currentGlobalProperties.clear();
   _currentGlobalKeywords.clear();
   _repairedMaterials.clear();
+  _prefabRenderability.clear();
   _fallbackShadedMaterials.clear();
   // A new beatmap gets a fresh chance: the watchdog is per level, not permanent.
   _selfDisabledThisLevel = false;

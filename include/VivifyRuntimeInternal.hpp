@@ -270,6 +270,9 @@ private:
   void ClearAssignedPrefabs(std::string_view objectType, std::optional<AssignedPrefabKind> kind = std::nullopt,
                             std::optional<int> saberType = std::nullopt, std::vector<TrackW> const* tracks = nullptr);
   std::vector<AssignedPrefabInfo*> GetValidPrefabInfos(std::vector<AssignedPrefabInfo*> const& infos);
+  // Classifies a replacement prefab asset once and remembers the answer, so a
+  // prefab that cannot draw is not instantiated once per note for a whole song.
+  PrefabRenderability EvaluatePrefabRenderability(std::string_view asset);
   bool ShouldHideOriginal(std::vector<AssignedPrefabInfo*> const& infos) const;
   void DisableOriginalRenderers(UnityEngine::GameObject* gameObject, VisualReplacement& replacement);
   void DisableOriginalRenderers(ArrayW<UnityEngine::Renderer*, Array<UnityEngine::Renderer*>*> const& renderers,
@@ -329,6 +332,7 @@ private:
   std::unordered_map<int, SavedGlobalValue> _currentGlobalProperties;
   std::unordered_map<std::string, bool> _currentGlobalKeywords;
   std::unordered_set<UnityEngine::Material*> _repairedMaterials;
+  std::unordered_map<std::string, PrefabRenderability> _prefabRenderability;
   std::unordered_map<UnityEngine::Renderer*, int> _overlayRendererSortingOrders;
   std::unordered_map<std::string, DeclaredTextureData> _declaredTextures;
   std::unordered_map<std::string, SecondaryCameraData> _secondaryCameras;
