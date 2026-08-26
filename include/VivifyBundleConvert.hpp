@@ -106,6 +106,19 @@ struct ShaderScan {
   std::vector<std::string> shaderNames;
   std::string unityVersion;
   std::string message;
+
+  // What the compiled programs inside those shaders turned out to be, once the
+  // blob is decompressed and split.
+  //
+  // The distinction that matters for conversion is glslSourcePrograms: a
+  // program of that kind is GLSL *text*, so producing one is writing a string
+  // rather than emitting a binary. A bundle that is entirely
+  // binaryPrograms is the case that needs a real cross-compiler.
+  int programs = 0;
+  int glslSourcePrograms = 0;
+  int binaryPrograms = 0;
+  int undecodableShaders = 0;
+  std::vector<int32_t> programTypes;  // union across every program, ascending
 };
 
 ShaderScan ScanShaders(std::string const& bundlePath);

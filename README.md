@@ -499,9 +499,33 @@ exists today:
 1. **Locate and decode Shader assets in the bundle.** Done --
    `VivifySerializedFile.cpp` parses the SerializedFile object table and walks
    Shader objects through the embedded type tree. Covered by `tools/shaderscan/`.
-2. **Decode Unity's shader blob**: LZ4-decompress `compressedBlob`, split it per
-   sub-program using `offsets`/`compressedLengths`, and parse each program's
-   Unity-specific header and reflection tables.
+2. **Decode Unity's shader blob.** Done -- `DecodeShaderPrograms` in
+   `VivifySerializedFile.cpp`. `offsets`/`compressedLengths`/
+   `decompressedLengths` are read out of the type tree as the nested tables
+   Unity 2019.3+ writes (one group per platform), each sub-blob is
+   LZ4-decompressed, and its `[offset, length]` program table is split into
+   individual sub-programs -- format version, `ShaderGpuProgramType`, keyword
+   tables and program bytes.
+
+   The LZ4 block decoder is written out here rather than vendored: it is small,
+   it runs on a headset, and it is fed untrusted bundle bytes, so every read and
+   write is bounds-checked. Unity has used both 8-byte and 12-byte program-table
+   entries; the entry size is determined from the data (only one of the two lays
+   every program inside the blob and clear of the table) rather than from a
+   version rule.
+
+   This is also where the size of step 3 gets settled per bundle, because the
+   scan now reports what the programs *are*:
+
+   ```
+   Vivify source bundle shaders: unity=2021.3.16f1 serializedFiles=1 shaders=24
+     runnableOnQuest=0 platforms=[Direct3D 11(4)] programs=61 glslSource=0
+     binary=61 programTypes=[D3D11 vertex sm5.0, D3D11 pixel sm5.0]
+   ```
+
+   `glslSource` counts programs stored as GLSL text, which are writable by
+   string manipulation. `binary` counts the ones that need a real
+   cross-compiler.
 3. **Cross-compile** each DXBC program to GLSL ES 3.x (or to SPIR-V via glslang,
    under Vulkan), which means vendoring HLSLcc -- roughly 30k lines of C++ --
    into an ARM64 Android mod.
