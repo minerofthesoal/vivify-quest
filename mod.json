@@ -5,7 +5,7 @@
   "id": "vivify",
   "modloader": "Scotland2",
   "author": "Rayla (merge of axo-lotl/Vivifhy-Quest, Braxed's Vivify-Quest-Port, and Lars27110's Vivify-Quest)",
-  "version": "0.9.2",
+  "version": "0.9.3",
   "packageId": "com.beatgames.beatsaber",
   "packageVersion": "1.40.8_7379",
   "description": "Personal Quest port of Vivify for Beat Saber, built on axo-lotl's CameraEvent-accurate rendering, with fixes for custom sabers, invisible notes and invisible arcs, plus an on-device PC-to-Android asset bundle converter.",

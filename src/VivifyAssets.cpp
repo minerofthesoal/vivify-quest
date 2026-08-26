@@ -988,19 +988,23 @@ void Runtime::LoadMainBundle() {
   WriteLevelStartReport();
 }
 
-UnityEngine::Object* Runtime::GetAssetObject(std::string_view assetName) const {
-  auto it = _assets.find(NormalizeAssetKey(assetName));
-  if (it != _assets.end()) {
+UnityEngine::Object* Runtime::LookUpAsset(std::string_view assetName) const {
+  auto key = NormalizeAssetKey(assetName);
+  if (auto it = _assets.find(key); it != _assets.end()) {
     return it->second;
   }
-  auto nameIt = _assetsByName.find(NormalizeAssetKey(assetName));
-  if (nameIt != _assetsByName.end()) {
+  if (auto nameIt = _assetsByName.find(key); nameIt != _assetsByName.end()) {
     return nameIt->second;
   }
-  if (GetVivifyDebugLogging()) {
+  return nullptr;
+}
+
+UnityEngine::Object* Runtime::GetAssetObject(std::string_view assetName) const {
+  auto* asset = LookUpAsset(assetName);
+  if (asset == nullptr && GetVivifyDebugLogging()) {
     PaperLogger.warn("Vivify asset lookup miss: '{}'", std::string(assetName));
   }
-  return nullptr;
+  return asset;
 }
 
 // Names the graphics API, which decides whether a shader stage like a geometry
@@ -1092,7 +1096,13 @@ UnityEngine::Shader* Runtime::FindUsableShader(std::string const& shaderName) co
       it != _supportedShadersByName.end() && IsAlive(it->second) && it->second->get_isSupported()) {
     return it->second;
   }
-  auto* bundled = il2cpp_utils::try_cast<UnityEngine::Shader>(GetAssetObject(shaderName)).value_or(nullptr);
+  // Deliberately the quiet lookup: this searches by *shader* name
+  // ("Swifter/VFX/Star"), and the asset maps are keyed by asset path and file
+  // name, so a miss here is the normal case rather than a problem. Routing it
+  // through GetAssetObject logged one "asset lookup miss" warning per attempt
+  // -- 332 of them in a single session, one for every shader the repair pass
+  // tried to find a supported twin for.
+  auto* bundled = il2cpp_utils::try_cast<UnityEngine::Shader>(LookUpAsset(shaderName)).value_or(nullptr);
   if (IsAlive(bundled) && bundled->get_isSupported()) {
     return bundled;
   }
@@ -1255,24 +1265,38 @@ void Runtime::RepairMaterialShader(UnityEngine::Material* material, std::string_
   if (!IsAlive(replacement)) {
     replacement = FindFallbackShader();
   }
-  // Substituting a stand-in trades "invisible" for "visible but wrong". That is
-  // only a good trade when something of the original look survives: if neither
-  // a colour nor a texture could be recovered, the stand-in paints an arbitrary
-  // flat white shape over the scene, which for a large or full-screen mesh is
-  // considerably worse than the object simply not drawing. Leave the dead
-  // shader in place instead -- for notes and sabers ReplacementCanRender then
-  // keeps the game's own visuals, which look right.
+  // A material with nothing to carry over used to be left with its dead shader,
+  // on the reasoning that a flat white mesh is worse than none. In practice it
+  // is the other way round, and this is why models go missing on maps whose
+  // shaders otherwise work: a material with no colour-shaped property and no
+  // texture -- which is most of a raymarch or effect material, whose properties
+  // are things like _Speed and _Iterations -- simply never drew. The 0.8.9 log
+  // from a real session declined 299 of them in one sitting, and the issue
+  // thread describes the result exactly: "blank for some of the intro, then it
+  // has the graphics for some of the sections".
+  //
+  // The stand-in is taken now, tinted a dim neutral grey rather than left at
+  // white. That keeps the original worry honest -- a large or full-screen mesh
+  // no longer flashes blinding white -- while the geometry is at least present.
+  // Anyone who prefers the old behaviour has the "Stand-In Shading" toggle,
+  // which is the one case still declined here.
   bool const canCarryLook = fallbackState.color.has_value() || IsManagedAlive(fallbackState.mainTexture);
-  bool const declineStandIn = IsAlive(replacement) && replacement == _fallbackShader &&
-                              (!canCarryLook || !GetStandInShading());
-  if (declineStandIn) {
+  bool const usingGenericStandIn = IsAlive(replacement) && replacement == _fallbackShader;
+  if (usingGenericStandIn && !GetStandInShading()) {
     _shaderRepairFailed++;
-    PaperLogger.warn("Vivify shader stand-in declined: material '{}' (shader '{}') -- {}",
-                     ToStdString(material->get_name()), originalShaderName,
-                     !GetStandInShading() ? "stand-in shading is turned off in settings"
-                                          : "no colour or texture to carry over, so it would render flat white");
+    PaperLogger.warn("Vivify shader stand-in declined: material '{}' (shader '{}') -- "
+                     "stand-in shading is turned off in settings",
+                     ToStdString(material->get_name()), originalShaderName);
     _repairedMaterials.emplace(material);
     return;
+  }
+  if (usingGenericStandIn && !canCarryLook) {
+    // Dim, opaque, and deliberately unlike anything a map would author, so it
+    // reads as "this is a stand-in" rather than as the intended look.
+    fallbackState.color = UnityEngine::Color(0.25f, 0.25f, 0.28f, 1.0f);
+    PaperLogger.warn("Vivify shader stand-in: material '{}' (shader '{}') had no colour or texture "
+                     "to carry over, so it is drawn in neutral grey rather than not at all",
+                     ToStdString(material->get_name()), originalShaderName);
   }
 
   if (IsAlive(replacement)) {
