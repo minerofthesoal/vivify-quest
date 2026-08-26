@@ -81,6 +81,19 @@ struct Result {
 // Status::AlreadyAndroid and writes nothing.
 Result ConvertToAndroid(std::string const& sourcePath, std::string const& destPath);
 
+// Unpacks a bundle, rebuilds every SerializedFile inside it through
+// SerializedFileParse::RewriteSerializedFile, and repacks the result.
+//
+// This is conversion step 4 with no shader edits in it, and it exists to be
+// run: the whole point of the rewrite path is that a resized object must leave
+// a bundle that still loads, and the only way to have any confidence in that
+// before there is a shader to resize is to put real bundles through the exact
+// same code and require the result to come back identical.
+//
+// A bundle whose files all rebuild unchanged produces output equivalent to what
+// ConvertToAndroid's writer would have produced from the untouched data.
+Result RepackBundle(std::string const& sourcePath, std::string const& destPath);
+
 // True if the file at path begins with the UnityFS archive signature.
 //
 // Reads 8 bytes; it does not validate the rest of the archive. Vivify maps do

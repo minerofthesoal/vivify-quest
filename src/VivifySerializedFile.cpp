@@ -137,9 +137,33 @@ struct SerializedTypeInfo {
 };
 
 struct ObjectInfo {
+  int64_t pathID = 0;
   int64_t byteStart = 0;
   uint32_t byteSize = 0;
   int32_t typeIndex = 0;
+  // Where this entry's byteStart and byteSize fields sit in the file. The
+  // rewriter patches them in place rather than rebuilding the metadata, which
+  // is what keeps the type tree, externals and everything else byte-identical.
+  size_t byteStartFieldOffset = 0;
+  size_t byteSizeFieldOffset = 0;
+};
+
+// Everything about a SerializedFile that both reading its shaders and rewriting
+// its objects need. Parsed once, by ParseLayout.
+struct Layout {
+  bool isSerializedFile = false;
+  bool parsed = false;
+  uint32_t version = 0;
+  bool bigEndian = false;
+  size_t headerLength = 0;
+  uint64_t metadataSize = 0;
+  uint64_t fileSize = 0;
+  uint64_t dataOffset = 0;
+  bool typeTreePresent = false;
+  std::string unityVersion;
+  std::vector<SerializedTypeInfo> types;
+  std::vector<ObjectInfo> objects;
+  std::string message;
 };
 
 // Resolves a node's name. Offsets into Unity's built-in common table (high bit
@@ -639,82 +663,90 @@ bool ShaderPlatformRunsOnQuest(int32_t platform) {
   return platform == kShaderPlatformGLES3Plus || platform == kShaderPlatformVulkan;
 }
 
-FileReport InspectSerializedFile(uint8_t const* data, size_t size) {
-  FileReport report;
-  if (data == nullptr || size < 32) return report;
+namespace {
+
+// Reads a SerializedFile's header, type table and object table.
+//
+// This is the one place that knows the file's shape. Both InspectSerializedFile
+// (which reads shaders out of it) and RewriteSerializedFile (which rebuilds it
+// with new object bodies) go through here, so the two can never drift apart on
+// where a field is.
+bool ParseLayout(uint8_t const* data, size_t size, Layout& layout) {
+  if (data == nullptr || size < 32) return false;
 
   Reader reader(data, size);
-  uint64_t metadataSize = reader.u32be();
-  uint64_t fileSize = reader.u32be();
-  uint32_t const version = reader.u32be();
-  uint64_t dataOffset = reader.u32be();
-  if (!reader.ok() || version < 8 || version > 100) return report;
+  layout.metadataSize = reader.u32be();
+  layout.fileSize = reader.u32be();
+  layout.version = reader.u32be();
+  layout.dataOffset = reader.u32be();
+  if (!reader.ok() || layout.version < 8 || layout.version > 100) return false;
 
-  bool bigEndian = true;
-  if (version >= 9) {
-    bigEndian = reader.u8() != 0;
+  layout.bigEndian = true;
+  if (layout.version >= 9) {
+    layout.bigEndian = reader.u8() != 0;
     reader.skip(3);
   }
-  if (version >= 22) {
-    metadataSize = reader.u32be();
-    fileSize = reader.u64be();
-    dataOffset = reader.u64be();
+  if (layout.version >= 22) {
+    layout.metadataSize = reader.u32be();
+    layout.fileSize = reader.u64be();
+    layout.dataOffset = reader.u64be();
     reader.skip(8);  // reserved
   }
-  if (!reader.ok()) return report;
+  if (!reader.ok()) return false;
+  layout.headerLength = reader.position();
+
   // Same consistency test the converter uses to tell a serialized file apart
   // from a raw .resS payload node that happens to sit in the same archive.
-  if (fileSize == 0 || fileSize > size) return report;
-  if (dataOffset == 0 || dataOffset > fileSize) return report;
-  if (metadataSize == 0 || metadataSize > fileSize) return report;
+  if (layout.fileSize == 0 || layout.fileSize > size) return false;
+  if (layout.dataOffset == 0 || layout.dataOffset > layout.fileSize) return false;
+  if (layout.metadataSize == 0 || layout.metadataSize > layout.fileSize) return false;
 
-  reader.setBigEndian(bigEndian);
-  report.isSerializedFile = true;
+  reader.setBigEndian(layout.bigEndian);
+  layout.isSerializedFile = true;
 
-  if (version >= 7) {
-    report.unityVersion = reader.cstring(64);
-    if (!reader.ok() || report.unityVersion.empty()) {
-      report.message = "unreadable Unity version string";
-      return report;
+  if (layout.version >= 7) {
+    layout.unityVersion = reader.cstring(64);
+    if (!reader.ok() || layout.unityVersion.empty()) {
+      layout.message = "unreadable Unity version string";
+      return false;
     }
     // This string goes straight into a log line, and a corrupted or hostile
     // bundle can put arbitrary bytes here. Keep it to printable ASCII.
-    for (char& c : report.unityVersion) {
+    for (char& c : layout.unityVersion) {
       if (c < 0x20 || c > 0x7e) c = '?';
     }
   }
-  if (version >= 8) reader.skip(4);  // m_TargetPlatform
+  if (layout.version >= 8) reader.skip(4);  // m_TargetPlatform
 
   bool enableTypeTree = true;
-  if (version >= 13) enableTypeTree = reader.u8() != 0;
-  report.typeTreePresent = enableTypeTree;
+  if (layout.version >= 13) enableTypeTree = reader.u8() != 0;
+  layout.typeTreePresent = enableTypeTree;
 
   int32_t const typeCount = static_cast<int32_t>(reader.u32());
   if (!reader.ok() || typeCount < 0 || static_cast<uint32_t>(typeCount) > size) {
-    report.message = "implausible type count";
-    return report;
+    layout.message = "implausible type count";
+    return false;
   }
 
-  std::vector<SerializedTypeInfo> types;
-  types.reserve(static_cast<size_t>(typeCount));
+  layout.types.reserve(static_cast<size_t>(typeCount));
   for (int32_t i = 0; i < typeCount && reader.ok(); i++) {
     SerializedTypeInfo type;
     type.classID = static_cast<int32_t>(reader.u32());
-    if (version >= 16) reader.u8();                       // isStrippedType
-    if (version >= 17) reader.u16();                      // scriptTypeIndex
-    if (version >= 13) {
-      bool const hasScriptHash = (version < 16 && type.classID < 0) ||
-                                 (version >= 16 && type.classID == 114);
+    if (layout.version >= 16) reader.u8();                       // isStrippedType
+    if (layout.version >= 17) reader.u16();                      // scriptTypeIndex
+    if (layout.version >= 13) {
+      bool const hasScriptHash = (layout.version < 16 && type.classID < 0) ||
+                                 (layout.version >= 16 && type.classID == 114);
       if (hasScriptHash) reader.skip(16);
-      reader.skip(16);                                    // old type hash
+      reader.skip(16);                                           // old type hash
     }
     if (enableTypeTree) {
       int32_t const nodeCount = static_cast<int32_t>(reader.u32());
       int32_t const stringBufferSize = static_cast<int32_t>(reader.u32());
       if (!reader.ok() || nodeCount < 0 || stringBufferSize < 0 ||
           static_cast<uint32_t>(nodeCount) > size || static_cast<uint32_t>(stringBufferSize) > size) {
-        report.message = "implausible type tree size";
-        return report;
+        layout.message = "implausible type tree size";
+        return false;
       }
       type.nodes.reserve(static_cast<size_t>(nodeCount));
       for (int32_t n = 0; n < nodeCount && reader.ok(); n++) {
@@ -727,65 +759,233 @@ FileReport InspectSerializedFile(uint8_t const* data, size_t size) {
         node.byteSize = static_cast<int32_t>(reader.u32());
         node.index = static_cast<int32_t>(reader.u32());
         node.metaFlag = reader.u32();
-        if (version >= 19) reader.skip(8);  // ref type hash
+        if (layout.version >= 19) reader.skip(8);  // ref type hash
         type.nodes.push_back(node);
       }
-      if (!reader.ok()) { report.message = "truncated type tree"; return report; }
+      if (!reader.ok()) { layout.message = "truncated type tree"; return false; }
       type.stringBuffer.resize(static_cast<size_t>(stringBufferSize));
       if (stringBufferSize > 0) {
         reader.raw(reinterpret_cast<uint8_t*>(type.stringBuffer.data()),
                    static_cast<size_t>(stringBufferSize));
       }
-      if (version >= 21) {
+      if (layout.version >= 21) {
         int32_t const dependencyCount = static_cast<int32_t>(reader.u32());
         if (reader.ok() && dependencyCount > 0 && static_cast<uint32_t>(dependencyCount) < size) {
           reader.skip(static_cast<size_t>(dependencyCount) * 4);
         }
       }
     }
-    types.push_back(std::move(type));
+    layout.types.push_back(std::move(type));
   }
-  if (!reader.ok()) { report.message = "truncated type table"; return report; }
+  if (!reader.ok()) { layout.message = "truncated type table"; return false; }
 
   int32_t const objectCount = static_cast<int32_t>(reader.u32());
   if (!reader.ok() || objectCount < 0 || static_cast<uint32_t>(objectCount) > size) {
-    report.message = "implausible object count";
-    return report;
+    layout.message = "implausible object count";
+    return false;
   }
-  report.objectCount = objectCount;
 
-  std::vector<ObjectInfo> objects;
-  objects.reserve(static_cast<size_t>(objectCount));
+  layout.objects.reserve(static_cast<size_t>(objectCount));
   for (int32_t i = 0; i < objectCount && reader.ok(); i++) {
-    if (version >= 14) reader.align4();
+    if (layout.version >= 14) reader.align4();
     ObjectInfo object;
-    reader.u64();  // pathID
-    object.byteStart = version >= 22 ? static_cast<int64_t>(reader.u64())
-                                     : static_cast<int64_t>(reader.u32());
+    object.pathID = static_cast<int64_t>(reader.u64());
+    object.byteStartFieldOffset = reader.position();
+    object.byteStart = layout.version >= 22 ? static_cast<int64_t>(reader.u64())
+                                            : static_cast<int64_t>(reader.u32());
+    object.byteSizeFieldOffset = reader.position();
     object.byteSize = reader.u32();
     object.typeIndex = static_cast<int32_t>(reader.u32());
-    objects.push_back(object);
+    layout.objects.push_back(object);
   }
-  if (!reader.ok()) { report.message = "truncated object table"; return report; }
+  if (!reader.ok()) { layout.message = "truncated object table"; return false; }
+
+  layout.parsed = true;
+  return true;
+}
+
+}  // namespace
+
+FileReport InspectSerializedFile(uint8_t const* data, size_t size) {
+  FileReport report;
+  Layout layout;
+  bool const ok = ParseLayout(data, size, layout);
+  report.isSerializedFile = layout.isSerializedFile;
+  report.typeTreePresent = layout.typeTreePresent;
+  report.unityVersion = layout.unityVersion;
+  report.message = layout.message;
+  if (!ok) return report;
 
   report.parsed = true;
-  for (auto const& object : objects) {
-    if (object.typeIndex < 0 || static_cast<size_t>(object.typeIndex) >= types.size()) continue;
-    SerializedTypeInfo const& type = types[static_cast<size_t>(object.typeIndex)];
+  report.objectCount = static_cast<int32_t>(layout.objects.size());
+  for (auto const& object : layout.objects) {
+    if (object.typeIndex < 0 || static_cast<size_t>(object.typeIndex) >= layout.types.size()) continue;
+    SerializedTypeInfo const& type = layout.types[static_cast<size_t>(object.typeIndex)];
     if (type.classID != kClassIdShader) continue;
     report.shaderObjectCount++;
-    if (!enableTypeTree || type.nodes.empty()) continue;
+    if (!layout.typeTreePresent || type.nodes.empty()) continue;
 
-    uint64_t const start = static_cast<uint64_t>(object.byteStart) + dataOffset;
+    uint64_t const start = static_cast<uint64_t>(object.byteStart) + layout.dataOffset;
     if (start >= size || object.byteSize > size - start) continue;
-    report.shaders.push_back(
-        ReadShaderObject(data + start, object.byteSize, static_cast<size_t>(start), type));
+    ShaderObject shader =
+        ReadShaderObject(data + start, object.byteSize, static_cast<size_t>(start), type);
+    shader.pathID = object.pathID;
+    report.shaders.push_back(std::move(shader));
   }
 
-  if (!enableTypeTree && report.shaderObjectCount > 0) {
+  if (!layout.typeTreePresent && report.shaderObjectCount > 0) {
     report.message = "type tree stripped: shader objects found but their contents cannot be decoded";
   }
   return report;
+}
+
+RewriteResult RewriteSerializedFile(uint8_t const* data, size_t size,
+                                    std::vector<ObjectEdit> const& edits) {
+  RewriteResult result;
+  Layout layout;
+  if (!ParseLayout(data, size, layout)) {
+    result.message = layout.message.empty() ? "not a serialized file" : layout.message;
+    return result;
+  }
+
+  // The metadata is copied verbatim, padding included, and only the object
+  // table's byteStart/byteSize fields are patched. That is the whole trick:
+  // nothing about the type tree, externals, script types or user information
+  // changes when an object's *body* changes, so none of it has to be rebuilt --
+  // and anything this parser does not understand survives untouched.
+  if (layout.dataOffset > size) {
+    result.message = "data offset lies outside the file";
+    return result;
+  }
+  std::vector<uint8_t> head(data, data + layout.dataOffset);
+
+  // Objects are laid out in the order they appear in the file, not the order
+  // they appear in the table, so that an unedited file rebuilds to the same
+  // bytes it started as.
+  std::vector<size_t> order(layout.objects.size());
+  for (size_t i = 0; i < order.size(); i++) order[i] = i;
+  std::stable_sort(order.begin(), order.end(), [&layout](size_t a, size_t b) {
+    return layout.objects[a].byteStart < layout.objects[b].byteStart;
+  });
+
+  // The data region is rebuilt rather than copied, but everything in it that is
+  // not an object body is carried over untouched: the gap that preceded each
+  // object, and anything past the last one. Two reasons, and the second is the
+  // one that matters.
+  //
+  // With nothing edited, preserving the gaps puts every object back at the
+  // offset it already had, so the rewrite reproduces its input byte for byte --
+  // which is the only property that can be checked before there is a real
+  // shader to write.
+  //
+  // And a file is not required to be nothing but objects. A header this parser
+  // reads but whose object table is empty or unfamiliar would otherwise rebuild
+  // to an empty data region, quietly discarding the entire payload. Bytes this
+  // code does not understand are kept, not dropped.
+  uint64_t const regionSize = layout.fileSize - layout.dataOffset;
+  uint8_t const* const region = data + layout.dataOffset;
+
+  std::vector<uint8_t> body;
+  int replaced = 0;
+  uint64_t previousEnd = 0;
+  for (size_t index : order) {
+    ObjectInfo& object = layout.objects[index];
+    if (object.byteStart < 0 || static_cast<uint64_t>(object.byteStart) < previousEnd) {
+      result.message = "objects overlap or run backwards in the data region";
+      return result;
+    }
+    if (static_cast<uint64_t>(object.byteStart) > regionSize ||
+        object.byteSize > regionSize - static_cast<uint64_t>(object.byteStart)) {
+      result.message = "an object's body lies outside the file";
+      return result;
+    }
+
+    ObjectEdit const* edit = nullptr;
+    for (auto const& candidate : edits) {
+      if (candidate.pathID == object.pathID) { edit = &candidate; break; }
+    }
+
+    uint64_t const gapStart = previousEnd;
+    uint64_t const gap = static_cast<uint64_t>(object.byteStart) - previousEnd;
+    body.insert(body.end(), region + gapStart, region + gapStart + gap);
+    // Unity puts object bodies on 8-byte boundaries. With the gaps preserved
+    // this is already satisfied for an unedited file, so it only bites once a
+    // resize has moved something.
+    while (body.size() % 8 != 0) body.push_back(0);
+
+    previousEnd = static_cast<uint64_t>(object.byteStart) + object.byteSize;
+
+    uint8_t const* sourceBytes = region + object.byteStart;
+    size_t sourceSize = object.byteSize;
+    if (edit != nullptr) {
+      sourceBytes = edit->body.data();
+      sourceSize = edit->body.size();
+      replaced++;
+    }
+
+    object.byteStart = static_cast<int64_t>(body.size());
+    object.byteSize = static_cast<uint32_t>(sourceSize);
+    if (sourceSize > 0) body.insert(body.end(), sourceBytes, sourceBytes + sourceSize);
+  }
+
+  if (previousEnd < regionSize) {
+    body.insert(body.end(), region + previousEnd, region + regionSize);
+  }
+
+  if (replaced != static_cast<int>(edits.size())) {
+    result.message = "an edit named a pathID this file does not contain";
+    return result;
+  }
+
+  auto writeField = [&head, &layout](size_t offset, uint64_t value, size_t width) {
+    for (size_t i = 0; i < width; i++) {
+      size_t const shift = layout.bigEndian ? 8 * (width - 1 - i) : 8 * i;
+      head[offset + i] = static_cast<uint8_t>(value >> shift);
+    }
+  };
+
+  size_t const startWidth = layout.version >= 22 ? 8 : 4;
+  for (auto const& object : layout.objects) {
+    if (object.byteStartFieldOffset + startWidth > head.size() ||
+        object.byteSizeFieldOffset + 4 > head.size()) {
+      result.message = "object table extends past the metadata";
+      return result;
+    }
+    // Before version 22 a byteStart is a 32-bit field. Growing a file past 4GB
+    // is not something to discover by silently truncating an offset.
+    if (startWidth == 4 && static_cast<uint64_t>(object.byteStart) > 0xffffffffull) {
+      result.message = "rewritten file needs 64-bit object offsets, which this file version lacks";
+      return result;
+    }
+    writeField(object.byteStartFieldOffset, static_cast<uint64_t>(object.byteStart), startWidth);
+    writeField(object.byteSizeFieldOffset, object.byteSize, 4);
+  }
+
+  // The header's size fields are big-endian regardless of the file's own
+  // endianness flag, and only the total changes: the metadata kept its length,
+  // so the data offset is the same as it was.
+  uint64_t const total = layout.dataOffset + body.size();
+  auto writeBE = [&head](size_t offset, uint64_t value, size_t width) {
+    for (size_t i = 0; i < width; i++) {
+      head[offset + i] = static_cast<uint8_t>(value >> (8 * (width - 1 - i)));
+    }
+  };
+  if (layout.version >= 22) {
+    if (head.size() < 48) { result.message = "truncated header"; return result; }
+    writeBE(24, total, 8);
+  } else {
+    if (head.size() < 20) { result.message = "truncated header"; return result; }
+    if (total > 0xffffffffull) {
+      result.message = "rewritten file exceeds the 32-bit size field of this file version";
+      return result;
+    }
+    writeBE(4, total, 4);
+  }
+
+  result.data = std::move(head);
+  result.data.insert(result.data.end(), body.begin(), body.end());
+  result.ok = true;
+  return result;
 }
 
 }  // namespace SerializedFileParse

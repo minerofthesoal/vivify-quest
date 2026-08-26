@@ -112,6 +112,7 @@ struct ShaderSubProgram {
 };
 
 struct ShaderObject {
+  int64_t pathID = 0;              // identifies this object inside its SerializedFile
   std::string name;                // empty when the name resolved only via the common string table
   std::vector<int32_t> platforms;  // ShaderCompilerPlatform values, in file order
 
@@ -146,6 +147,38 @@ struct DecodeResult {
 // levels are bounds-checked against the buffer they came from: bundles are
 // untrusted input and a converted map is written from whatever this returns.
 DecodeResult DecodeShaderPrograms(uint8_t const* data, size_t size, ShaderObject const& shader);
+
+// Replaces one object's serialized body.
+struct ObjectEdit {
+  int64_t pathID = 0;
+  std::vector<uint8_t> body;
+};
+
+struct RewriteResult {
+  bool ok = false;
+  std::vector<uint8_t> data;
+  std::string message;
+};
+
+// Rebuilds a SerializedFile with some objects' bodies replaced by new ones.
+//
+// This is the step that makes shader conversion more than a cross-compiler
+// bolt-on. The converter today rewrites a single int32 in place and never
+// changes any object's size; a rewritten shader is a different length, and the
+// object table stores absolute byte offsets, so every object after it moves.
+//
+// The metadata is copied verbatim -- type tree, externals, script types, user
+// information, padding, all of it -- and only the object table's byteStart and
+// byteSize fields are patched. Nothing about an object's *body* changes any of
+// the rest, so none of it has to be rebuilt, and anything this parser does not
+// understand survives untouched. The data region is then relaid with each body
+// on an 8-byte boundary, in the order the objects appear in the file, so a
+// rewrite with no edits reproduces the file it was given.
+//
+// Fails rather than truncating when a rewritten file would need offsets wider
+// than the file's own version can store.
+RewriteResult RewriteSerializedFile(uint8_t const* data, size_t size,
+                                    std::vector<ObjectEdit> const& edits);
 
 // LZ4 block-format decompression, exposed for testing.
 //

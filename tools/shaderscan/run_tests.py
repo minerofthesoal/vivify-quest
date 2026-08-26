@@ -60,6 +60,35 @@ def run3(data):
     return proc, fields, shaders
 
 
+def rewrite(data, edits=(), sf_version=21):
+    """Rewrites a SerializedFile through the C++ writer and reports both what
+    the writer said and what the result parses back as."""
+    src = os.path.join(tmpdir, "rewrite-in.sf")
+    dst = os.path.join(tmpdir, "rewrite-out.sf")
+    with open(src, "wb") as handle:
+        handle.write(data)
+    args = [BINARY, "--rewrite", src, dst]
+    args += [f"{path_id}={body.hex()}" for (path_id, body) in edits]
+    proc = subprocess.run(args, capture_output=True, timeout=60)
+    text = proc.stdout.decode("utf-8", errors="replace")
+    fields = {}
+    shaders = []
+    for line in text.splitlines():
+        if line.startswith("shader="):
+            name, _, platforms = line[len("shader="):].partition(" platforms=")
+            shaders.append((name, [int(x) for x in platforms.split(",") if x]))
+        elif line.startswith("program="):
+            continue
+        elif "=" in line:
+            key, _, value = line.partition("=")
+            fields[key] = value
+    written = b""
+    if os.path.exists(dst):
+        with open(dst, "rb") as handle:
+            written = handle.read()
+    return proc, fields, shaders, written
+
+
 def lz4(block, capacity):
     path = os.path.join(tmpdir, "block.lz4")
     with open(path, "wb") as handle:
@@ -250,6 +279,96 @@ for _ in range(300):
         store_fuzz += 1
 check("no corrupted program store crashes the decoder", store_fuzz == 0,
       f"{store_fuzz} bad exits")
+
+
+# --- rewriting a serialized file (conversion step 4) ------------------------
+#
+# The point of the rewriter is that an object's body can change length. The
+# object table stores absolute offsets, so everything after a resized object
+# moves, and getting that wrong corrupts a bundle that used to load.
+
+plain = mkshader.serialized_file_with_shaders([("Custom/Raymarch", [mkshader.D3D11])])
+proc, f, s_, out = rewrite(plain)
+check("a rewrite with no edits reproduces the file byte for byte",
+      f.get("rewriteOk") == "1" and f.get("identical") == "1" and out == plain, f)
+
+two = mkshader.serialized_file_with_shaders([
+    ("A", [mkshader.D3D11]),
+    ("B", [mkshader.GLES3PLUS]),
+])
+proc, f, s_, out = rewrite(two)
+check("a multi-object rewrite with no edits is also unchanged",
+      f.get("identical") == "1" and out == two, f)
+
+# Growing an object pushes every later object along; the file has to still
+# parse, and every shader has to still be found where the table now says.
+grown = mkshader.shader_object("Custom/Raymarch", [mkshader.D3D11]) + b"\x00" * 64
+proc, f, s_, out = rewrite(plain, [(1, grown)])
+check("a grown object still parses back", f.get("parsed") == "1", f)
+check("a grown object keeps its shader readable", s_ == [("Custom/Raymarch", [4])], s_)
+check("a grown object makes the file bigger",
+      int(f.get("rewriteSize", "0")) > len(plain), f)
+
+# Shrinking is the same machinery in reverse, and the strongest check of it is
+# that padding an object out and then putting the original body back reproduces
+# the file exactly -- every later object has to have moved forward and then back
+# to precisely where it started.
+_, f, _, grown_file = rewrite(plain, [(1, grown)])
+original_body = mkshader.shader_object("Custom/Raymarch", [mkshader.D3D11])
+proc, f, s_, back = rewrite(grown_file, [(1, original_body)])
+check("shrinking an object back restores the original file exactly",
+      back == plain and s_ == [("Custom/Raymarch", [4])], (f, s_))
+check("shrinking makes the file smaller again",
+      int(f.get("rewriteSize", "0")) < len(grown_file), f)
+
+# With several objects, a resize has to carry the ones after it along.
+big_first = mkshader.shader_object("A", [mkshader.D3D11]) + b"\x00" * 128
+_, f, _, spread = rewrite(two, [(1, big_first)])
+proc, f, s_, out = rewrite(spread, [(1, mkshader.shader_object("A", [mkshader.D3D11]))])
+check("a shrunk object still parses back, and later objects follow it",
+      out == two and s_ == [("A", [4]), ("B", [9])], (f, s_))
+
+# Object identity has to survive: step 3 will match a rewritten shader to its
+# original by pathID, and a rewrite that renumbered them would silently pair the
+# wrong programs with the wrong shader.
+proc, f, s_, out = rewrite(two, [(2, mkshader.shader_object("B2", [mkshader.VULKAN]))])
+check("an edit is applied to the object named by pathID, not by position",
+      s_ == [("A", [4]), ("B2", [18])], s_)
+
+# 64-bit offset files take the same path through a different header field.
+big = mkshader.serialized_file_with_shaders([("Big", [mkshader.D3D11])], sf_version=22)
+proc, f, s_, out = rewrite(big)
+check("version 22 rewrites unchanged", f.get("identical") == "1" and out == big, f)
+proc, f, s_, out = rewrite(big, [(1, grown)])
+check("version 22 rewrites a grown object",
+      f.get("parsed") == "1" and s_ == [("Custom/Raymarch", [4])], (f, s_))
+
+# An edit naming an object that is not there must fail rather than be ignored:
+# silently dropping a shader rewrite would produce a bundle that looks converted
+# and is not.
+proc, f, s_, out = rewrite(plain, [(999, b"\x00\x00\x00\x00")])
+check("an edit for an unknown pathID is refused",
+      f.get("rewriteOk") == "0" and "pathID" in f.get("rewriteMessage", ""), f)
+
+# Rewriting things that are not serialized files at all.
+proc, f, s_, out = rewrite(b"UnityFS\0" + bytes(200))
+check("rewriting a non-serialized file is refused", f.get("rewriteOk") == "0", f)
+proc, f, s_, out = rewrite(b"")
+check("rewriting empty input is refused", f.get("rewriteOk") == "0", f)
+
+# Corrupted input into the rewriter, since it now writes files rather than only
+# reading them.
+rnd3 = random.Random(20260827)
+rewrite_crashes = 0
+for _ in range(200):
+    corrupt = bytearray(two)
+    for _ in range(rnd3.randrange(1, 12)):
+        corrupt[rnd3.randrange(len(corrupt))] = rnd3.randrange(256)
+    proc, _, _, _ = rewrite(bytes(corrupt))
+    if proc.returncode not in (0, 1):
+        rewrite_crashes += 1
+check("no corrupted file crashes the rewriter", rewrite_crashes == 0,
+      f"{rewrite_crashes} bad exits")
 
 print()
 print(f"{passed}/{passed + failed} passed")

@@ -864,6 +864,59 @@ TargetPlatformField FindTargetPlatform(uint8_t const* data, size_t dataSize, siz
 // Repacking.
 // ---------------------------------------------------------------------------
 
+// Replaces one directory node's contents inside an unpacked archive.
+//
+// A node whose length changes moves every node stored after it, and the
+// directory table records absolute offsets into the unpacked data, so both the
+// bytes and the table have to be rebuilt together. This is the outer half of
+// conversion step 4: RewriteSerializedFile fixes the object offsets inside one
+// file, and this fixes the node offsets around it.
+//
+// The gap that preceded each node in the original is preserved, so replacing a
+// node with exactly the bytes it already had reproduces the buffer it started
+// as.
+bool ReplaceNodeData(std::vector<DirectoryNode>& nodes, std::vector<uint8_t>& data,
+                     size_t nodeIndex, std::vector<uint8_t> const& replacement) {
+  if (nodeIndex >= nodes.size()) return false;
+
+  std::vector<size_t> order(nodes.size());
+  for (size_t i = 0; i < order.size(); i++) order[i] = i;
+  std::stable_sort(order.begin(), order.end(), [&nodes](size_t a, size_t b) {
+    return nodes[a].offset < nodes[b].offset;
+  });
+
+  std::vector<uint8_t> rebuilt;
+  uint64_t previousEnd = 0;
+  for (size_t index : order) {
+    DirectoryNode& node = nodes[index];
+    if (node.offset < previousEnd) return false;  // overlapping nodes: refuse rather than guess
+    if (node.offset > data.size() || node.size > data.size() - node.offset) return false;
+
+    uint64_t const gap = node.offset - previousEnd;
+    previousEnd = node.offset + node.size;
+    rebuilt.insert(rebuilt.end(), static_cast<size_t>(gap), 0);
+
+    uint8_t const* source = data.data() + node.offset;
+    size_t const sourceSize = static_cast<size_t>(node.size);
+    node.offset = rebuilt.size();
+    if (index == nodeIndex) {
+      node.size = replacement.size();
+      rebuilt.insert(rebuilt.end(), replacement.begin(), replacement.end());
+    } else {
+      rebuilt.insert(rebuilt.end(), source, source + sourceSize);
+    }
+  }
+
+  // Anything past the last node -- Unity does not write it, but a bundle is
+  // untrusted input -- is carried over rather than dropped.
+  if (previousEnd < data.size()) {
+    rebuilt.insert(rebuilt.end(), data.begin() + static_cast<long>(previousEnd), data.end());
+  }
+
+  data = std::move(rebuilt);
+  return true;
+}
+
 bool WriteConverted(std::string const& destPath, ArchiveHeader const& header,
                     std::vector<DirectoryNode> const& nodes, std::vector<uint8_t> const& data, Result& result) {
   // Blocks/directory table for the uncompressed output.
@@ -1127,6 +1180,48 @@ std::string DescribeShaderScan(ShaderScan const& scan) {
   if (scan.typeTreeStripped) text += " typeTree=stripped";
   if (!scan.message.empty()) text += " note='" + scan.message + "'";
   return text;
+}
+
+Result RepackBundle(std::string const& sourcePath, std::string const& destPath) {
+  Result result;
+  ArchiveHeader header;
+  std::vector<DirectoryNode> nodes;
+  std::vector<uint8_t> data;
+  std::vector<TargetPlatformField> fields;
+  if (!LoadAndScan(sourcePath, header, nodes, data, fields, result)) return result;
+
+  int rebuilt = 0;
+  for (size_t i = 0; i < nodes.size(); i++) {
+    if (nodes[i].offset > data.size() || nodes[i].size > data.size() - nodes[i].offset) {
+      result.status = Status::Corrupt;
+      result.message = "directory node '" + nodes[i].path + "' points outside the unpacked data";
+      return result;
+    }
+    size_t const available = static_cast<size_t>(nodes[i].size);
+    auto rewritten = SerializedFileParse::RewriteSerializedFile(
+        data.data() + nodes[i].offset, available, {});
+    // A node that is not a serialized file is a raw .resS payload; leave it be.
+    if (!rewritten.ok) continue;
+
+    if (!ReplaceNodeData(nodes, data, i, rewritten.data)) {
+      result.status = Status::Corrupt;
+      result.message = "could not relay the archive around a rebuilt '" + nodes[i].path + "'";
+      return result;
+    }
+    rebuilt++;
+  }
+
+  if (rebuilt == 0) {
+    result.status = Status::Corrupt;
+    result.message = "no SerializedFile inside the archive could be rebuilt";
+    return result;
+  }
+
+  if (!WriteConverted(destPath, header, nodes, data, result)) return result;
+  result.status = Status::Success;
+  result.serializedFilesRetargeted = rebuilt;
+  result.message = "rebuilt " + std::to_string(rebuilt) + " serialized file(s) through the rewriter";
+  return result;
 }
 
 Result ConvertToAndroid(std::string const& sourcePath, std::string const& destPath) {
