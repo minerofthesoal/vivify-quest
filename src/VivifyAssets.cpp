@@ -364,7 +364,16 @@ void Runtime::HandleLevelSelected(SongCore::API::LevelSelect::LevelWasSelectedEv
     return;
   }
 
-  MetaCore::Game::SetScoreSubmission("Vivify", false);
+  // Vivify changes how a map looks, not how it plays: no note timing, no
+  // scoring, nothing a leaderboard measures. Disabling submission for every
+  // Vivify map -- which is what this did unconditionally -- also stopped
+  // BeatLeader and ScoreSaber recording a replay, which is why Vivify maps had
+  // no replays to watch or render. Submission is on by default now, with a
+  // setting for anyone who wants the old behaviour.
+  bool const submit = GetSubmitScoresOnVivifyMaps();
+  MetaCore::Game::SetScoreSubmission("Vivify", submit);
+  PaperLogger.info("Vivify score submission: {} for this Vivify map",
+                   submit ? "enabled" : "disabled by setting");
 
   std::string const androidBundlePath = JoinPath(_selectedLevelPath, std::string(kBundleFile));
 

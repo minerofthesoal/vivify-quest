@@ -97,6 +97,12 @@ jobs:
     - name: Checkout
       uses: actions/checkout@v4
 
+    - name: Install the reference lz4 library
+      # The shader-program encoder is cross-checked against real LZ4 rather than
+      # only against the decoder living beside it, so a matching pair of bugs in
+      # the two cannot pass unnoticed. A missing module fails the job on purpose.
+      run: pip install lz4
+
     - name: Build the SerializedFile shader scanner for the host, with sanitizers
       run: |
         g++ -std=c++20 -O1 -g -fsanitize=address,undefined \

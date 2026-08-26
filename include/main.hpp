@@ -25,6 +25,9 @@ bool GetDisableVisualsInMultiplayer();
 bool GetDisableVRCenterAdjust();
 bool GetConvertPcBundlesOnDevice();
 bool GetStandInShading();
+// Whether a map carrying the Vivify requirement still submits its score.
+// Submission gates replay recording, so turning it off leaves no replay behind.
+bool GetSubmitScoresOnVivifyMaps();
 void EnsureConfigDefaults();
 constexpr auto PaperLogger = Paper::ConstLoggerContext("Vivify");
 
