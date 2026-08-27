@@ -374,6 +374,15 @@ void Runtime::HandleLevelSelected(SongCore::API::LevelSelect::LevelWasSelectedEv
   MetaCore::Game::SetScoreSubmission("Vivify", submit);
   PaperLogger.info("Vivify score submission: {} for this Vivify map",
                    submit ? "enabled" : "disabled by setting");
+  // The settings that decide whether a map renders at all, recorded once per
+  // level. Chasing "geometry stopped being repaired halfway through a session"
+  // took a guess at which toggle had moved, because nothing in the log said
+  // what any of them were set to at the time.
+  PaperLogger.info("Vivify settings for this level: standInShading={} convertPcBundlesOnDevice={} "
+                   "disableCustomNoteVisuals={} disableAllBlits={} multipassRendering={}",
+                   BoolText(GetStandInShading()), BoolText(GetConvertPcBundlesOnDevice()),
+                   BoolText(GetDisableCustomNoteVisuals()), BoolText(GetDisableAllBlits()),
+                   BoolText(GetMultipassRenderingEnabled()));
 
   std::string const androidBundlePath = JoinPath(_selectedLevelPath, std::string(kBundleFile));
 
@@ -1128,6 +1137,23 @@ void Runtime::EnsureGameShaderIndex() {
   }
   PaperLogger.info("Vivify shader index: {} runnable shader name(s) available in this process",
                    _gameShadersByName.size());
+  // Which shaders a Quest build actually ships decides which stand-in Vivify can
+  // pick, and that list is not knowable from a PC checkout -- it has to come off
+  // a headset. Logging the names once per level costs one line and makes a
+  // session log enough to tune the fallback ordering.
+  if (!_gameShadersByName.empty()) {
+    std::string names;
+    for (auto const& entry : _gameShadersByName) {
+      if (!names.empty()) names += ", ";
+      names += entry.first;
+      // One line, not a log flood: the tail is only ever more of the same.
+      if (names.size() > 4000) {
+        names += ", ...";
+        break;
+      }
+    }
+    PaperLogger.info("Vivify shader index contents: {}", names);
+  }
 }
 
 UnityEngine::Shader* Runtime::FindUsableShader(std::string const& shaderName) {
@@ -1188,34 +1214,70 @@ UnityEngine::Shader* Runtime::FindFallbackShader() {
   // scan per material per spawn. That is not a slow frame, it is a stopped game.
   if (_fallbackShaderSearchFailed) return nullptr;
   _fallbackShader = nullptr;
+  EnsureGameShaderIndex();
 
-  // Names worth trying directly, cheapest first. Beat Saber's own shaders come
-  // before Unity's built-ins because they are the ones actually present.
-  static constexpr std::string_view preferredNames[] = {
-      "Custom/SimpleLit"sv, "Custom/Glowing"sv,     "BeatSaber/Unlit Glow"sv,
-      "Unlit/Texture"sv,    "Unlit/Color"sv,        "Sprites/Default"sv,
-      "UI/Default"sv,       "Standard"sv,
+  // Shader.Find only resolves shaders included in the build or already loaded
+  // from a bundle, and on Quest almost none of Beat Saber's own shaders answer
+  // to it -- which is why a by-name search kept falling through to Unity's
+  // built-ins. The index built from Resources.FindObjectsOfTypeAll does answer,
+  // so it is asked first.
+  auto resolveByName = [this](std::string_view name) -> UnityEngine::Shader* {
+    auto const key = NormalizeAssetKey(std::string(name));
+    if (auto it = _gameShadersByName.find(key); it != _gameShadersByName.end()) {
+      if (IsAlive(it->second) && it->second->get_isSupported()) return it->second;
+    }
+    auto* found = UnityEngine::Shader::Find(StringW(std::string(name))).unsafePtr();
+    if (IsAlive(found) && found->get_isSupported()) return found;
+    return nullptr;
   };
+
   // A stand-in that cannot be tinted is why notes came out white. Note and
   // saber replacements are coloured by writing _Color into a
-  // MaterialPropertyBlock; Unlit/Texture -- which used to win this list -- has
-  // no _Color at all, so every write went nowhere and every replaced block
-  // rendered untinted. A shader is only acceptable here if the colour can
-  // actually land on it.
+  // MaterialPropertyBlock, so a shader is only fully acceptable here if the
+  // colour can actually land on it.
   auto carriesColour = [](UnityEngine::Shader* shader) {
     return shader->FindPropertyIndex(StringW("_Color")) >= 0 ||
            shader->FindPropertyIndex(StringW("_BaseColor")) >= 0;
   };
+
+  // Names worth trying directly, best first. Every entry here shades opaque 3D
+  // geometry.
+  //
+  // Sprites/Default and UI/Default used to be on this list, and that is what
+  // turned converted maps black: a sprite shader carries _Color, so requiring
+  // _Color promoted it over Unlit/Texture, and then it was handed 3D meshes.
+  // Sprites/Default multiplies by the vertex COLOR stream, blends against the
+  // frame, and writes no depth -- a mesh with no vertex-colour channel (which
+  // is most map geometry) reads whatever the driver leaves in that register,
+  // and on the Quest's GLES driver that is zero. Black geometry, blended over
+  // a black frame. Neither shader belongs anywhere near a mesh.
+  static constexpr std::string_view preferredNames[] = {
+      "Custom/SimpleLit"sv,     "Custom/Glowing"sv,       "Custom/GlowingInstancedHD"sv,
+      "Custom/OpaqueNeonLight"sv, "Custom/UnlitGlow"sv,   "BeatSaber/Unlit Glow"sv,
+      "Unlit/Texture"sv,        "Unlit/Color"sv,          "Standard"sv,
+      "Mobile/Diffuse"sv,       "Legacy Shaders/Diffuse"sv,
+  };
+  // A named 3D shader that cannot be tinted still beats a sprite shader, so a
+  // colourless one is kept as a runner-up rather than discarded outright.
+  UnityEngine::Shader* colourlessRunnerUp = nullptr;
   for (auto name : preferredNames) {
-    auto* candidate = UnityEngine::Shader::Find(StringW(std::string(name))).unsafePtr();
-    if (IsAlive(candidate) && candidate->get_isSupported() && carriesColour(candidate)) {
+    auto* candidate = resolveByName(name);
+    if (candidate == nullptr) continue;
+    if (carriesColour(candidate)) {
       _fallbackShader = candidate;
-      PaperLogger.info("Vivify fallback shader: using '{}'", ShaderNameForLog(candidate));
+      PaperLogger.info("Vivify fallback shader: using '{}' (named candidate, tintable)",
+                       ShaderNameForLog(candidate));
       return _fallbackShader;
     }
+    if (colourlessRunnerUp == nullptr) colourlessRunnerUp = candidate;
   }
 
   // Nothing by name -- score every shader currently loaded and take the best.
+  //
+  // The category decides the winner and the property bonuses only break ties
+  // within a category. They used to be worth 50 each against category scores
+  // 10 apart, so "some sprite shader with a texture and a colour" outranked
+  // every real lit shader in the process.
   auto scoreShader = [](std::string const& lowerName) -> int {
     // Shaders that exist but would draw nothing useful for arbitrary geometry.
     static constexpr std::string_view excluded[] = {
@@ -1226,13 +1288,18 @@ UnityEngine::Shader* Runtime::FindFallbackShader() {
     for (auto bad : excluded) {
       if (lowerName.find(bad) != std::string::npos) return -1;
     }
+    // Sprite and UI shaders sort *below* an unrecognised shader, not above it:
+    // they are 2D shaders and drawing a mesh with one is the failure this
+    // ordering exists to avoid. They stay on the list only as a last resort.
+    if (lowerName.find("sprite") != std::string::npos) return 5;
+    if (lowerName.find("ui/") != std::string::npos) return 4;
     if (lowerName.find("unlit") != std::string::npos) return 100;
     if (lowerName.find("simplelit") != std::string::npos) return 90;
     if (lowerName.find("standard") != std::string::npos) return 80;
     if (lowerName.find("glow") != std::string::npos) return 70;
     if (lowerName.find("lit") != std::string::npos) return 60;
-    if (lowerName.find("sprite") != std::string::npos) return 30;
-    if (lowerName.find("ui/") != std::string::npos) return 20;
+    if (lowerName.find("diffuse") != std::string::npos) return 50;
+    if (lowerName.find("particle") != std::string::npos) return 15;
     return 10;
   };
 
@@ -1248,17 +1315,15 @@ UnityEngine::Shader* Runtime::FindFallbackShader() {
       std::transform(lowerName.begin(), lowerName.end(), lowerName.begin(),
                      [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
       int score = scoreShader(lowerName);
+      if (score <= 0) continue;
       // A stand-in is only useful if the original material's look can be
       // carried across. One that exposes neither _MainTex nor a colour renders
       // everything flat white, which is what made converted maps come up
-      // partially or fully white.
-      if (score > 0) {
-        if (candidate->FindPropertyIndex(StringW("_MainTex")) >= 0) score += 50;
-        if (candidate->FindPropertyIndex(StringW("_Color")) >= 0 ||
-            candidate->FindPropertyIndex(StringW("_BaseColor")) >= 0) {
-          score += 50;
-        }
-      }
+      // partially or fully white. These break ties inside a category; they
+      // never promote one category over another.
+      score *= 100;
+      if (candidate->FindPropertyIndex(StringW("_MainTex")) >= 0) score += 30;
+      if (carriesColour(candidate)) score += 40;
       if (score <= bestScore) continue;
       bestScore = score;
       _fallbackShader = candidate;
@@ -1268,17 +1333,22 @@ UnityEngine::Shader* Runtime::FindFallbackShader() {
   if (IsAlive(_fallbackShader)) {
     PaperLogger.info("Vivify fallback shader: scanned loaded shaders, using '{}' (score {})",
                      ShaderNameForLog(_fallbackShader), bestScore);
-  } else {
-    PaperLogger.error("Vivify fallback shader: no usable shader found; assets with unsupported "
-                      "shaders will not render");
+    return _fallbackShader;
   }
-  if (!IsAlive(_fallbackShader)) {
-    _fallbackShaderSearchFailed = true;
-    PaperLogger.warn(
-        "Vivify found no usable stand-in shader among the shaders loaded in this process. "
-        "Materials with unsupported shaders will be left alone rather than rescanning every time.");
+
+  if (IsAlive(colourlessRunnerUp)) {
+    _fallbackShader = colourlessRunnerUp;
+    PaperLogger.info("Vivify fallback shader: using '{}' (named candidate; it has no colour "
+                     "property, so stand-ins wear their texture untinted)",
+                     ShaderNameForLog(_fallbackShader));
+    return _fallbackShader;
   }
-  return _fallbackShader;
+
+  _fallbackShaderSearchFailed = true;
+  PaperLogger.warn(
+      "Vivify found no usable stand-in shader among the shaders loaded in this process. "
+      "Materials with unsupported shaders will be left alone rather than rescanning every time.");
+  return nullptr;
 }
 
 void Runtime::RepairMaterialShader(UnityEngine::Material* material, std::string_view context) {
