@@ -35,6 +35,7 @@ constexpr std::string_view kDisableVRCenterAdjustConfigKey = "disableVRCenterAdj
 constexpr std::string_view kConvertPcBundlesOnDeviceConfigKey = "convertPcBundlesOnDevice";
 constexpr std::string_view kStandInShadingConfigKey = "standInShading";
 constexpr std::string_view kSubmitScoresConfigKey = "submitScoresOnVivifyMaps";
+constexpr std::string_view kTranslateShadersConfigKey = "translateShadersOnConversion";
 bool gMultipassRenderingEnabled = true;
 bool gVivifyDebugLogging = false;
 bool gDisableBeat0FilmgrainBlit = false;
@@ -65,6 +66,15 @@ bool gStandInShading = true;
 // BeatLeader and ScoreSaber record no replay, so Vivify maps had no replays to
 // watch or render at all.
 bool gSubmitScores = true;
+// On-device conversion now cross-compiles a PC bundle's DirectX shader programs
+// to GLSL ES (VivifyDxbc) rather than only retargeting the archive, so a
+// converted map can render its own shading instead of a stand-in. A shader
+// using anything outside the translated subset is left exactly as it was, so
+// the worst case is the behaviour this replaces. Turning this off falls back to
+// the retarget-only conversion, which is the escape hatch if a translated
+// bundle turns out worse than an unshaded one -- no new build required, just
+// reconvert.
+bool gTranslateShaders = true;
 
 // Both diagnostic files live beside the mod's own data, and both are .txt.
 //
@@ -268,6 +278,11 @@ void RegisterModSettings() {
             [](bool value) { SetBoolConfigValue(kStandInShadingConfigKey, value, gStandInShading); });
 
         BSML::Lite::CreateToggle(
+            container->get_transform(), u"Translate Shaders On Conversion",
+            GetTranslateShadersOnConversion(),
+            [](bool value) { SetBoolConfigValue(kTranslateShadersConfigKey, value, gTranslateShaders); });
+
+        BSML::Lite::CreateToggle(
             container->get_transform(), u"Submit Scores On Vivify Maps",
             GetSubmitScoresOnVivifyMaps(),
             [](bool value) { SetBoolConfigValue(kSubmitScoresConfigKey, value, gSubmitScores); });
@@ -395,6 +410,10 @@ bool GetSubmitScoresOnVivifyMaps() {
   return gSubmitScores;
 }
 
+bool GetTranslateShadersOnConversion() {
+  return gTranslateShaders;
+}
+
 void EnsureConfigDefaults() {
   auto& config = getConfig();
   auto& doc = config.config;
@@ -413,6 +432,7 @@ void EnsureConfigDefaults() {
   needsWrite |= EnsureBoolConfigValue(kConvertPcBundlesOnDeviceConfigKey, true, gConvertPcBundlesOnDevice);
   needsWrite |= EnsureBoolConfigValue(kStandInShadingConfigKey, true, gStandInShading);
   needsWrite |= EnsureBoolConfigValue(kSubmitScoresConfigKey, true, gSubmitScores);
+  needsWrite |= EnsureBoolConfigValue(kTranslateShadersConfigKey, true, gTranslateShaders);
   if (needsWrite) {
     config.Write();
   }

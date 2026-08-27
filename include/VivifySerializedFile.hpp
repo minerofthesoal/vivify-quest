@@ -142,6 +142,26 @@ struct ShaderObject {
   bool blobPresent = false;
   size_t blobFileOffset = 0;
   size_t blobSize = 0;
+  // True when the blob is followed by alignment padding, which a converted
+  // blob of a different length has to have recomputed.
+  bool blobAligned = false;
+
+  // Where this object's body sits in the buffer that was parsed, and where the
+  // int32 tables inside it start (one entry per group, file-absolute, pointing
+  // at the group's first element).
+  //
+  // Conversion does not re-serialize a Shader object. It rewrites the values of
+  // tables whose element counts have not changed and splices a new blob in
+  // place of the old one, so everything else in the object -- m_ParsedForm, the
+  // dependency lists, the fields this parser only walks past -- survives byte
+  // for byte. Rebuilding the object from a partial understanding of its layout
+  // would lose exactly the parts nothing here reads.
+  size_t bodyFileOffset = 0;
+  size_t bodySize = 0;
+  std::vector<size_t> platformsTableOffsets;
+  std::vector<size_t> offsetsTableOffsets;
+  std::vector<size_t> compressedLengthsTableOffsets;
+  std::vector<size_t> decompressedLengthsTableOffsets;
 };
 
 struct DecodeResult {
@@ -215,6 +235,31 @@ struct EncodedProgramStore {
 // back out: decoding this store has to yield the programs that went in.
 EncodedProgramStore EncodeShaderPrograms(std::vector<int32_t> const& platforms,
                                          std::vector<ShaderSubProgram> const& programs);
+
+// One Shader object's body, rebuilt around a converted program store.
+struct ShaderBodyRewrite {
+  bool ok = false;
+  std::vector<uint8_t> body;
+  std::string message;
+};
+
+// Rebuilds a Shader object's serialized body with new platform ids and a new
+// program store.
+//
+// Nothing is re-serialized from scratch. The tables whose element counts do not
+// change are patched where they sit, and the blob is spliced in with its length
+// prefix and trailing alignment recomputed, so every other field -- including
+// the ones this parser only walks past to stay in step -- comes through byte
+// for byte. That is the difference between a converted bundle that still loads
+// and one that is a plausible guess at Unity's layout.
+//
+// `platforms` must have the same length as the shader's own platforms array,
+// and `store` the same group and sub-blob counts, because a different shape
+// would need the object rebuilt rather than patched. Anything else is refused.
+ShaderBodyRewrite BuildShaderObjectBody(uint8_t const* data, size_t size,
+                                        ShaderObject const& shader,
+                                        std::vector<int32_t> const& platforms,
+                                        EncodedProgramStore const& store);
 
 // LZ4 block-format compression, for writing a converted shader's programs back
 // into a bundle.

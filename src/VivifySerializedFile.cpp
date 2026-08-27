@@ -203,9 +203,18 @@ struct FieldCapture {
   bool wantBytes = false;
 
   std::vector<std::vector<int32_t>> groups;  // one per int array encountered
+  // Where each group's first element sits, relative to the start of the object
+  // body. Conversion patches these tables in place -- the counts do not change,
+  // only the values -- so the writer needs to know where they are rather than
+  // having to re-serialize the whole object around them.
+  std::vector<size_t> groupOffsets;
   bool sawBytes = false;
   size_t byteOffset = 0;  // relative to the start of the object body
   size_t byteCount = 0;
+  // Whether the byte array is followed by alignment padding. A converted blob
+  // is a different length, so the padding after it has to be recomputed, and
+  // that is only correct if it is known to be there in the first place.
+  bool bytesAligned = false;
 
   bool empty() const { return groups.empty() && !sawBytes; }
 };
@@ -244,10 +253,13 @@ void WalkNode(Reader& reader, SerializedTypeInfo const& type, size_t nodeIndex,
         capture->sawBytes = true;
         capture->byteOffset = reader.position();
         capture->byteCount = static_cast<size_t>(bytes);
+        capture->bytesAligned = (node.metaFlag & kMetaFlagAlignBytes) != 0 ||
+                                (element.metaFlag & kMetaFlagAlignBytes) != 0;
         reader.skip(static_cast<size_t>(bytes));
       } else if (capture != nullptr && !capture->wantBytes && element.byteSize == 4) {
         std::vector<int32_t> group;
         group.reserve(count);
+        capture->groupOffsets.push_back(reader.position());
         for (uint32_t i = 0; i < count; i++) group.push_back(static_cast<int32_t>(reader.u32()));
         capture->groups.push_back(std::move(group));
       } else {
@@ -294,12 +306,17 @@ ShaderObject ReadShaderObject(uint8_t const* data, size_t size, size_t fileOffse
 
   // The five fields that describe the compiled program store. Everything else
   // in a Shader object is walked only to stay in step with the byte stream.
-  auto captureInts = [&](Reader& reader, size_t child, std::vector<std::vector<int32_t>>& into) {
+  auto captureInts = [&](Reader& reader, size_t child, std::vector<std::vector<int32_t>>& into,
+                         std::vector<size_t>& locations) {
     FieldCapture capture;
     WalkNode(reader, type, child, &capture, 1);
     into = std::move(capture.groups);
+    locations.clear();
+    for (size_t offset : capture.groupOffsets) locations.push_back(fileOffset + offset);
   };
 
+  shader.bodyFileOffset = fileOffset;
+  shader.bodySize = size;
   Reader reader(data, size);
   for (size_t child : ChildIndices(type.nodes, 0)) {
     if (!reader.ok()) break;
@@ -312,12 +329,16 @@ ShaderObject ReadShaderObject(uint8_t const* data, size_t size, size_t fileOffse
       for (auto const& group : capture.groups) {
         shader.platforms.insert(shader.platforms.end(), group.begin(), group.end());
       }
+      for (size_t offset : capture.groupOffsets) {
+        shader.platformsTableOffsets.push_back(fileOffset + offset);
+      }
     } else if (name == "offsets") {
-      captureInts(reader, child, shader.offsets);
+      captureInts(reader, child, shader.offsets, shader.offsetsTableOffsets);
     } else if (name == "compressedLengths") {
-      captureInts(reader, child, shader.compressedLengths);
+      captureInts(reader, child, shader.compressedLengths, shader.compressedLengthsTableOffsets);
     } else if (name == "decompressedLengths") {
-      captureInts(reader, child, shader.decompressedLengths);
+      captureInts(reader, child, shader.decompressedLengths,
+                  shader.decompressedLengthsTableOffsets);
     } else if (name == "compressedBlob") {
       FieldCapture capture;
       capture.wantBytes = true;
@@ -326,6 +347,7 @@ ShaderObject ReadShaderObject(uint8_t const* data, size_t size, size_t fileOffse
         shader.blobPresent = true;
         shader.blobFileOffset = fileOffset + capture.byteOffset;
         shader.blobSize = capture.byteCount;
+        shader.blobAligned = capture.bytesAligned;
       }
     } else {
       size_t const before = reader.position();
@@ -733,6 +755,134 @@ void WriteSubProgram(ShaderSubProgram const& program, std::vector<uint8_t>& out)
 }
 
 }  // namespace
+
+namespace {
+
+void WriteLittleU32(std::vector<uint8_t>& out, size_t offset, uint32_t value) {
+  out[offset] = static_cast<uint8_t>(value & 0xffu);
+  out[offset + 1] = static_cast<uint8_t>((value >> 8) & 0xffu);
+  out[offset + 2] = static_cast<uint8_t>((value >> 16) & 0xffu);
+  out[offset + 3] = static_cast<uint8_t>((value >> 24) & 0xffu);
+}
+
+}  // namespace
+
+ShaderBodyRewrite BuildShaderObjectBody(uint8_t const* data, size_t size,
+                                        ShaderObject const& shader,
+                                        std::vector<int32_t> const& platforms,
+                                        EncodedProgramStore const& store) {
+  ShaderBodyRewrite result;
+  if (data == nullptr) {
+    result.message = "no buffer to rebuild from";
+    return result;
+  }
+  if (shader.bodySize == 0 || shader.bodyFileOffset > size ||
+      shader.bodySize > size - shader.bodyFileOffset) {
+    result.message = "the shader's body lies outside the file";
+    return result;
+  }
+  if (!store.ok) {
+    result.message = "the program store to write back did not encode";
+    return result;
+  }
+  if (!shader.blobPresent) {
+    result.message = "the shader carries no compressedBlob to replace";
+    return result;
+  }
+  if (platforms.size() != shader.platforms.size()) {
+    result.message = "the converted platform list is a different length than the shader's";
+    return result;
+  }
+  if (shader.platformsTableOffsets.size() != 1) {
+    result.message = "the shader's platforms field is not one flat array";
+    return result;
+  }
+  if (store.offsets.size() != shader.offsets.size() ||
+      store.compressedLengths.size() != shader.compressedLengths.size() ||
+      store.decompressedLengths.size() != shader.decompressedLengths.size()) {
+    result.message = "the converted store has a different number of platform groups";
+    return result;
+  }
+  if (shader.offsetsTableOffsets.size() != shader.offsets.size() ||
+      shader.compressedLengthsTableOffsets.size() != shader.compressedLengths.size() ||
+      shader.decompressedLengthsTableOffsets.size() != shader.decompressedLengths.size()) {
+    result.message = "the shader's length tables were not located while parsing";
+    return result;
+  }
+  for (size_t group = 0; group < store.offsets.size(); group++) {
+    if (store.offsets[group].size() != shader.offsets[group].size() ||
+        store.compressedLengths[group].size() != shader.compressedLengths[group].size() ||
+        store.decompressedLengths[group].size() != shader.decompressedLengths[group].size()) {
+      result.message = "the converted store has a different number of sub-blobs in group " +
+                       std::to_string(group);
+      return result;
+    }
+  }
+
+  size_t const bodyStart = shader.bodyFileOffset;
+  size_t const bodyEnd = bodyStart + shader.bodySize;
+  if (shader.blobFileOffset < bodyStart + 4 || shader.blobFileOffset > bodyEnd ||
+      shader.blobSize > bodyEnd - shader.blobFileOffset) {
+    result.message = "the shader's compressedBlob is not inside its own body";
+    return result;
+  }
+
+  std::vector<uint8_t> body(data + bodyStart, data + bodyEnd);
+
+  auto patchTable = [&](size_t fileOffset, std::vector<int32_t> const& values) -> bool {
+    if (fileOffset < bodyStart) return false;
+    size_t const relative = fileOffset - bodyStart;
+    uint64_t const bytes = static_cast<uint64_t>(values.size()) * 4u;
+    if (relative > body.size() || bytes > body.size() - relative) return false;
+    for (size_t i = 0; i < values.size(); i++) {
+      WriteLittleU32(body, relative + i * 4, static_cast<uint32_t>(values[i]));
+    }
+    return true;
+  };
+
+  if (!patchTable(shader.platformsTableOffsets[0], platforms)) {
+    result.message = "the platforms array does not fit where it was found";
+    return result;
+  }
+  for (size_t group = 0; group < store.offsets.size(); group++) {
+    if (!patchTable(shader.offsetsTableOffsets[group], store.offsets[group]) ||
+        !patchTable(shader.compressedLengthsTableOffsets[group], store.compressedLengths[group]) ||
+        !patchTable(shader.decompressedLengthsTableOffsets[group],
+                    store.decompressedLengths[group])) {
+      result.message = "a length table does not fit where it was found";
+      return result;
+    }
+  }
+
+  size_t const relativeBlob = shader.blobFileOffset - bodyStart;
+  size_t const oldPadding = shader.blobAligned ? (4 - (shader.blobSize % 4)) % 4 : 0;
+  if (relativeBlob + shader.blobSize + oldPadding > body.size()) {
+    result.message = "the compressedBlob and its padding run past the end of the object";
+    return result;
+  }
+  size_t const newPadding = shader.blobAligned ? (4 - (store.blob.size() % 4)) % 4 : 0;
+
+  std::vector<uint8_t> rebuilt;
+  rebuilt.reserve(body.size() - shader.blobSize + store.blob.size() + 4);
+  rebuilt.insert(rebuilt.end(), body.begin(), body.begin() + static_cast<long>(relativeBlob) - 4);
+  // The array's element count sits immediately before its data.
+  uint8_t countBytes[4];
+  uint32_t const count = static_cast<uint32_t>(store.blob.size());
+  countBytes[0] = static_cast<uint8_t>(count & 0xffu);
+  countBytes[1] = static_cast<uint8_t>((count >> 8) & 0xffu);
+  countBytes[2] = static_cast<uint8_t>((count >> 16) & 0xffu);
+  countBytes[3] = static_cast<uint8_t>((count >> 24) & 0xffu);
+  rebuilt.insert(rebuilt.end(), countBytes, countBytes + 4);
+  rebuilt.insert(rebuilt.end(), store.blob.begin(), store.blob.end());
+  rebuilt.insert(rebuilt.end(), newPadding, 0u);
+  rebuilt.insert(rebuilt.end(), body.begin() + static_cast<long>(relativeBlob + shader.blobSize +
+                                                                 oldPadding),
+                 body.end());
+
+  result.ok = true;
+  result.body = std::move(rebuilt);
+  return result;
+}
 
 EncodedProgramStore EncodeShaderPrograms(std::vector<int32_t> const& platforms,
                                          std::vector<ShaderSubProgram> const& programs) {

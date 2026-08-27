@@ -20,6 +20,7 @@ def _build_default_binary() -> str:
         os.path.join(root, "tools", "bundleconvert", "main.cpp"),
         os.path.join(root, "src", "VivifyBundleConvert.cpp"),
         os.path.join(root, "src", "VivifySerializedFile.cpp"),
+        os.path.join(root, "src", "VivifyDxbc.cpp"),
     ]
     subprocess.run(cmd, check=True)
     return out
@@ -204,6 +205,188 @@ if p.returncode != 0 and not os.path.exists(os.path.join(TMP, "rp_bad.out")):
     print("ok   repack rejects a non-bundle without leaving output")
 else:
     print("FAIL repack accepted a non-bundle:\n" + p.stdout); fails += 1
+
+# --- the whole conversion (conv --shaders) -----------------------------------
+#
+# A bundle carrying a real DXBC vertex program goes in; a bundle whose shader
+# says GLES3 and whose program is GLSL text comes out. The strongest check that
+# does not need a second parser written in Python is to run the *output* back
+# through the same conversion: a converted bundle already targets Android and
+# its shaders already run here, so the second pass must find nothing to do.
+
+sys.path.insert(0, os.path.join(os.path.dirname(HERE), "dxbc"))
+import mkdxbc as dx  # noqa: E402
+import mkshader  # noqa: E402
+
+DX11_VERTEX_SM50 = 16
+DX11_PIXEL_SM50 = 18
+GLES3_PLATFORM = 9
+
+MUL, MAD, ADD, RET, DCL_TEMPS, DCL_INPUT, DCL_OUTPUT, DCL_OUTPUT_SIV = 56, 50, 0, 62, 104, 95, 101, 103
+SAMPLE, DCL_SAMPLER, DCL_RESOURCE, DCL_INPUT_PS, MSAD = 69, 90, 88, 98, 213
+
+
+def dxbc_vertex():
+    isgn = dx.signature_chunk([{"name": "POSITION", "index": 0, "register": 0}], b"ISGN")
+    osgn = dx.signature_chunk(
+        [{"name": "SV_POSITION", "index": 0, "register": 0, "sv": 1, "rw_mask": 0}], b"OSGN")
+    rdef = dx.rdef_chunk(
+        constant_buffers=[{"name": "$Globals", "size": 64, "variables": [
+            {"name": "unity_MatrixVP", "offset": 0, "size": 64, "class": 3, "type": 3,
+             "rows": 4, "columns": 4, "elements": 0}]}],
+        bindings=[{"name": "$Globals", "type": 0, "dimension": 0, "bind_point": 0}])
+    code = []
+    code += dx.insn(DCL_INPUT, dx.dest(dx.OPERAND_INPUT, 0))
+    code += dx.insn(DCL_OUTPUT_SIV, dx.dest(dx.OPERAND_OUTPUT, 0), extra=[1])
+    code += dx.insn(DCL_TEMPS, extra=[1])
+    code += dx.insn(MUL, dx.dest(dx.OPERAND_TEMP, 0),
+                    dx.src(dx.OPERAND_INPUT, 0, (0, 0, 0, 0)), dx.src_cb(0, 0))
+    code += dx.insn(ADD, dx.dest(dx.OPERAND_OUTPUT, 0), dx.src(dx.OPERAND_TEMP, 0),
+                    dx.src_cb(0, 1))
+    code += dx.insn(RET)
+    return dx.container([rdef, isgn, osgn, dx.shex_chunk([code], stage=1)])
+
+
+def dxbc_untranslatable():
+    """Same framing, but using an instruction outside the translated subset.
+
+    msad is a sum-of-absolute-differences instruction with no GLSL ES form at
+    all, so it stays outside the subset however far the translator grows."""
+    isgn = dx.signature_chunk([{"name": "POSITION", "index": 0, "register": 0}], b"ISGN")
+    osgn = dx.signature_chunk(
+        [{"name": "SV_POSITION", "index": 0, "register": 0, "sv": 1, "rw_mask": 0}], b"OSGN")
+    code = []
+    code += dx.insn(DCL_TEMPS, extra=[1])
+    code += dx.insn(MSAD, dx.dest(dx.OPERAND_TEMP, 0), dx.src(dx.OPERAND_TEMP, 0),
+                    dx.src(dx.OPERAND_TEMP, 0), dx.src(dx.OPERAND_TEMP, 0))
+    code += dx.insn(RET)
+    return dx.container([isgn, osgn, dx.shex_chunk([code], stage=1)])
+
+
+def shader_bundle(path, shaders, sf_version=21, target=19):
+    sf = mkshader.serialized_file_with_shaders(shaders, sf_version=sf_version, target=target)
+    return build(path, sf_bytes=[sf], with_resource=False)
+
+
+def run_shaders(src, dst):
+    if os.path.exists(dst):
+        os.remove(dst)
+    proc = subprocess.run([CONV, "--shaders", src, dst], capture_output=True, text=True)
+    fields = {}
+    refusals = []
+    for line in proc.stdout.splitlines():
+        if line.startswith("refusal="):
+            refusals.append(line[len("refusal="):])
+            continue
+        # status and message are prose and hold spaces, so they are read as the
+        # whole line; the counters share one line and are split on spaces.
+        if line.startswith("status=") or line.startswith("message="):
+            key, _, value = line.partition("=")
+            fields[key] = value
+            continue
+        for part in line.split(" "):
+            key, _, value = part.partition("=")
+            if key and value:
+                fields.setdefault(key, value)
+    return proc, fields, refusals
+
+
+def shader_case(name, check, shaders, **kw):
+    global fails, cases
+    cases += 1
+    src = os.path.join(TMP, "sh_src.vivify")
+    dst = os.path.join(TMP, "sh_dst.vivify")
+    shader_bundle(src, shaders, **kw)
+    proc, fields, refusals = run_shaders(src, dst)
+    problem = check(proc, fields, refusals, dst)
+    if problem:
+        print(f"FAIL {name}: {problem}\n{proc.stdout}{proc.stderr}")
+        fails += 1
+    else:
+        print(f"ok   {name}")
+
+
+# One platform group holding one sub-blob holding one program.
+one_program = [[mkshader.program_blob([mkshader.sub_program(DX11_VERTEX_SM50, dxbc_vertex())])]]
+
+
+def expect_translated(proc, fields, refusals, dst):
+    if fields.get("status") != "converted":
+        return f"status '{fields.get('status')}'"
+    if fields.get("translated") != "1" or fields.get("programs") != "1":
+        return f"translated={fields.get('translated')} programs={fields.get('programs')}"
+    try:
+        read_converted(dst)
+    except Exception as e:
+        return f"converted bundle did not parse: {e}"
+    return None
+
+
+shader_case("a DirectX shader is translated and the bundle still parses",
+            expect_translated, [("Custom/Test", [4], one_program)])
+shader_case("translation works on SerializedFile v22", expect_translated,
+            [("Custom/Test", [4], one_program)], sf_version=22)
+
+
+def expect_idempotent(proc, fields, refusals, dst):
+    problem = expect_translated(proc, fields, refusals, dst)
+    if problem:
+        return problem
+    # Second pass over the converted bundle: nothing left to do.
+    again = os.path.join(TMP, "sh_dst2.vivify")
+    proc2, fields2, _ = run_shaders(dst, again)
+    if fields2.get("status") != "already an Android bundle":
+        return f"second pass status '{fields2.get('status')}' ({proc2.stdout})"
+    if fields2.get("leftAlone") != "1":
+        return f"second pass leftAlone={fields2.get('leftAlone')}"
+    if os.path.exists(again):
+        return "second pass wrote a file it had nothing to change in"
+    return None
+
+
+shader_case("a converted bundle converts to nothing on a second pass",
+            expect_idempotent, [("Custom/Test", [4], one_program)])
+
+
+def expect_refused(proc, fields, refusals, dst):
+    if fields.get("status") != "already an Android bundle":
+        return f"status '{fields.get('status')}' (nothing translated, nothing to retarget)"
+    if fields.get("refused") != "1":
+        return f"refused={fields.get('refused')}"
+    if not refusals or "msad" not in refusals[0]:
+        return f"refusal did not name the instruction: {refusals}"
+    return None
+
+
+untranslatable = [[mkshader.program_blob(
+    [mkshader.sub_program(DX11_VERTEX_SM50, dxbc_untranslatable())])]]
+shader_case("an untranslatable shader is refused by name, not half-converted",
+            expect_refused, [("Custom/Hard", [4], untranslatable)], target=ANDROID)
+
+
+def expect_mixed(proc, fields, refusals, dst):
+    if fields.get("status") != "converted":
+        return f"status '{fields.get('status')}'"
+    if fields.get("translated") != "1" or fields.get("refused") != "1":
+        return f"translated={fields.get('translated')} refused={fields.get('refused')}"
+    try:
+        read_converted(dst)
+    except Exception as e:
+        return f"converted bundle did not parse: {e}"
+    return None
+
+
+shader_case("a bundle with one good and one bad shader keeps both and stays loadable",
+            expect_mixed,
+            [("Custom/Good", [4], one_program), ("Custom/Bad", [4], untranslatable)])
+
+cases += 1
+p = subprocess.run([CONV, "--shaders", bad, os.path.join(TMP, "sh_bad.out")],
+                   capture_output=True, text=True)
+if p.returncode != 0 and not os.path.exists(os.path.join(TMP, "sh_bad.out")):
+    print("ok   shader conversion rejects a non-bundle without leaving output")
+else:
+    print("FAIL shader conversion accepted a non-bundle:\n" + p.stdout); fails += 1
 
 print(f"\n{cases - fails}/{cases} passed")
 sys.exit(1 if fails else 0)

@@ -46,7 +46,7 @@ jobs:
         g++ -std=c++20 -O1 -g -fsanitize=address,undefined \
             -I include -o /tmp/conv \
             tools/bundleconvert/main.cpp src/VivifyBundleConvert.cpp \
-            src/VivifySerializedFile.cpp
+            src/VivifySerializedFile.cpp src/VivifyDxbc.cpp
 
     - name: Round-trip and structure tests
       working-directory: tools/bundleconvert
@@ -111,6 +111,21 @@ jobs:
 
     - name: Shader scanner tests
       run: python3 tools/shaderscan/run_tests.py /tmp/shaderscan
+
+  dxbc-translator-tests:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Build the DXBC translator for the host, with sanitizers
+      run: |
+        g++ -std=c++20 -O1 -g -fsanitize=address,undefined \
+            -I include -o /tmp/dxbctool \
+            tools/dxbc/main.cpp src/VivifyDxbc.cpp
+
+    - name: DXBC translator tests
+      run: python3 tools/dxbc/run_tests.py /tmp/dxbctool
 
   report-writer-tests:
     runs-on: ubuntu-latest
