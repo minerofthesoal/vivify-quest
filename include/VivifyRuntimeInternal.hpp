@@ -140,7 +140,9 @@ private:
   void LogMaterialShader(std::string_view context, std::string_view assetPath, UnityEngine::Material* material) const;
   // Asset lookup without the miss warning, for searches whose misses are normal.
   UnityEngine::Object* LookUpAsset(std::string_view assetName) const;
-  UnityEngine::Shader* FindUsableShader(std::string const& shaderName) const;
+  UnityEngine::Shader* FindUsableShader(std::string const& shaderName);
+  // Builds the name -> runnable shader index the lookup above depends on.
+  void EnsureGameShaderIndex();
   UnityEngine::Shader* FindFallbackShader();
   // Returns a GPU-usable stand-in for a block-compressed texture this device
   // cannot sample, decoding it once and caching the result.
@@ -317,6 +319,10 @@ private:
   std::unordered_map<std::string, UnityEngine::Object*> _assets;
   std::unordered_map<std::string, UnityEngine::Object*> _assetsByName;
   std::unordered_map<std::string, UnityEngine::Shader*> _supportedShadersByName;
+  // Every runnable shader in the process, by name. Rebuilt per level, because
+  // the objects behind it are Unity's to destroy.
+  std::unordered_map<std::string, UnityEngine::Shader*> _gameShadersByName;
+  bool _gameShaderIndexBuilt = false;
   std::unordered_map<CustomJSONData::CustomEventData*, InstantiatePrefabData> _instantiatePrefabs;
   std::unordered_map<std::string, LivePrefab> _livePrefabs;
   std::vector<SyncedObject> _syncedObjects;
