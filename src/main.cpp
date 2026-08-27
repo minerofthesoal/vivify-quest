@@ -186,6 +186,18 @@ void RegisterModSettings() {
   BSML::BSMLSettings::get_instance()->TryAddSettingsMenu(
       [](HMUI::ViewController* viewController, bool firstActivation, bool, bool) {
         if (!firstActivation || viewController == nullptr) return;
+
+        // The whole menu is built inside a try/catch because it is built inside
+        // a callback the game invokes: anything that throws here abandons the
+        // rest of the construction and leaves the settings tab wedged, with the
+        // game still running around it. That is exactly what the version label
+        // added in 0.9.2 did -- it was the first widget in the list, so when it
+        // threw, every control after it simply never existed and the menu could
+        // not be used at all.
+        //
+        // A failure now costs the widgets after it and says so in the log,
+        // instead of costing the menu.
+        try {
         auto* container = BSML::Lite::CreateScrollableSettingsContainer(viewController->get_transform());
         if (container == nullptr) return;
 
@@ -193,10 +205,12 @@ void RegisterModSettings() {
         // "the new features do not work" and "the new build did not install"
         // look identical from the outside, and a version number here separates
         // them in one glance.
-        BSML::Lite::CreateText(
-            container->get_transform(),
-            std::u16string(u"Vivify ") +
-                std::u16string(std::string(VERSION).begin(), std::string(VERSION).end()));
+        //
+        // Built as a StringW from a std::string, the way every other text in
+        // this menu is: the std::u16string this used to assemble by hand is
+        // what took the menu down.
+        BSML::Lite::CreateText(container->get_transform(),
+                               StringW(std::string("Vivify ") + VERSION));
 
         BSML::Lite::CreateToggle(
             container->get_transform(), u"Debug logging", GetVivifyDebugLogging(),
@@ -282,6 +296,13 @@ void RegisterModSettings() {
         BSML::Lite::CreateText(
             container->get_transform(),
             StringW("<size=70%>" + std::string(kVivifyLogPath) + "</size>"));
+        } catch (std::exception const& e) {
+          PaperLogger.error("Vivify settings menu: construction threw ({}); the controls after the "
+                            "failure are missing", e.what());
+        } catch (...) {
+          PaperLogger.error("Vivify settings menu: construction threw; the controls after the "
+                            "failure are missing");
+        }
       },
       "Vivify", false);
 }

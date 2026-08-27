@@ -6,7 +6,7 @@
   "info": {
     "name": "Vivify",
     "id": "vivify",
-    "version": "0.9.4",
+    "version": "0.9.5",
     "url": "https://github.com/minerofthesoal/Vivify-Quest",
     "additionalData": {
       "overrideSoName": "libvivify.so",
