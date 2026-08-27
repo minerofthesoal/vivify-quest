@@ -9,12 +9,51 @@
 #include <chrono>
 #include <cstdio>
 #include <cstring>
+#include <fstream>
 #include <thread>
 #include <vector>
 
 namespace Vivify {
 
 namespace {
+
+// What conversion produces for a given input. Bumped whenever the converter
+// starts writing a different bundle from the same source.
+//
+// A converted bundle is cached on the headset and reused forever, keyed on the
+// source file. Without this, the shader-translating conversion would never run
+// for any map already converted by an earlier build: the cache would answer
+// first, with a bundle whose shaders are still DirectX, and the fix would look
+// like it had done nothing until someone found the reconvert button.
+//
+//   1  retarget only (every build up to 0.9.6)
+//   2  retarget plus DirectX -> GLSL ES shader translation
+constexpr int kBundleConversionVersion = 2;
+
+std::string ConversionMarkerPath(std::string const& destPath) {
+  return destPath + ".version";
+}
+
+// A cached conversion counts only if it was produced by this converter. A
+// bundle with no marker beside it came from a build that predates them.
+bool CachedConversionIsCurrent(std::string const& destPath) {
+  std::error_code ec;
+  if (!std::filesystem::exists(destPath, ec) || ec) return false;
+  std::ifstream marker(ConversionMarkerPath(destPath));
+  int version = 0;
+  if (!(marker >> version)) return false;
+  return version == kBundleConversionVersion;
+}
+
+void MarkConversionCurrent(std::string const& destPath) {
+  std::ofstream marker(ConversionMarkerPath(destPath), std::ios::out | std::ios::trunc);
+  if (!marker) {
+    PaperLogger.warn("Vivify could not record the converter version beside '{}'; the bundle will "
+                     "be reconverted every launch", destPath);
+    return;
+  }
+  marker << kBundleConversionVersion << "\n";
+}
 
 // Runs whichever conversion the settings ask for and flattens the two result
 // shapes into one.
@@ -32,9 +71,13 @@ struct BundleConversionOutcome {
 BundleConversionOutcome RunBundleConversion(std::string const& source, std::string const& dest) {
   if (!GetTranslateShadersOnConversion()) {
     auto const result = BundleConvert::ConvertToAndroid(source, dest);
+    // Deliberately not marked current: a retarget-only bundle is what the
+    // marker exists to invalidate, so turning the setting back on has to
+    // reconvert rather than reuse this.
     return {result.status, result.message};
   }
   auto const conversion = BundleConvert::ConvertShadersToGles(source, dest);
+  if (conversion.status == BundleConvert::Status::Success) MarkConversionCurrent(dest);
   // Logged here, on the worker, rather than folded into the message: a bundle
   // can refuse several shaders and each reason is a line worth reading on its
   // own when working out why a converted map still looks wrong.
@@ -435,7 +478,8 @@ void Runtime::HandleLevelSelected(SongCore::API::LevelSelect::LevelWasSelectedEv
   uint32_t const androidChecksum = ReadAndroidChecksumFromInfoDat(_selectedLevelPath);
   std::string const cachedConversion =
       pcBundleFallback.empty() ? std::string() : ConvertedBundlePath(pcBundleFallback);
-  bool const haveCachedConversion = !cachedConversion.empty() && std::filesystem::exists(cachedConversion);
+  bool const haveCachedConversion =
+      !cachedConversion.empty() && CachedConversionIsCurrent(cachedConversion);
 
   PaperLogger.info(
       "Vivify bundle selection: level='{}' androidBundle=no android2021={} pcBundle='{}' convertedCache='{}' cached={}",
@@ -559,7 +603,7 @@ void Runtime::ConvertPcBundleAsync(std::string const& levelPath, std::string con
   }
 
   std::string const destPath = ConvertedBundlePath(sourceBundlePath);
-  if (std::filesystem::exists(destPath)) {
+  if (CachedConversionIsCurrent(destPath)) {
     if (GetVivifyDebugLogging()) {
       PaperLogger.info("Vivify using cached converted bundle: '{}'", destPath);
     }
@@ -1780,12 +1824,17 @@ void StartBulkPcBundleConversion(std::function<void(BulkConversionProgress const
 
         std::string const dest = ConvertedBundlePath(source);
         if (std::filesystem::exists(dest)) {
-          if (!force) {
+          if (!force && CachedConversionIsCurrent(dest)) {
             progress.alreadyDone++;
             PaperLogger.info("Vivify bulk convert: '{}' already cached at '{}'", source, dest);
             continue;
           }
-          // Forced: drop the cached file so the conversion actually re-runs.
+          if (!force) {
+            PaperLogger.info("Vivify bulk convert: cached '{}' predates this converter, redoing it",
+                             dest);
+          }
+          // Forced, or cached by an older converter: drop the file so the
+          // conversion actually re-runs.
           // ConvertToAndroid writes through a .part file and renames, so a
           // failure after this point leaves no cached bundle rather than a
           // truncated one -- the level falls back to being unconverted, which
