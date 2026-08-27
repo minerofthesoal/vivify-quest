@@ -1,5 +1,6 @@
 #include "VivifyBundleConvert.hpp"
 #include "VivifySerializedFile.hpp"
+#include "VivifyDxbc.hpp"
 
 #include <algorithm>
 #include <set>
@@ -1079,6 +1080,202 @@ bool IsUnityBundleFile(std::string const& path) {
   char signature[8] = {};
   if (!in.read(signature, sizeof(signature))) return false;
   return std::memcmp(signature, "UnityFS\0", sizeof(signature)) == 0;
+}
+
+namespace {
+
+// True for a ShaderGpuProgramType that carries DirectX bytecode this converter
+// knows how to translate.
+bool IsTranslatableDirectXProgram(int32_t programType) {
+  switch (programType) {
+    case SerializedFileParse::kGpuProgramDX11VertexSM40:
+    case SerializedFileParse::kGpuProgramDX11VertexSM50:
+    case SerializedFileParse::kGpuProgramDX11PixelSM40:
+    case SerializedFileParse::kGpuProgramDX11PixelSM50:
+      return true;
+    default:
+      return false;
+  }
+}
+
+// Translates one shader's programs in place. Returns false, with a reason, if
+// any program in it could not be translated: a shader is converted whole or
+// not at all, because a program store holding half GLSL and half DirectX would
+// leave Unity picking whichever it found first.
+bool TranslateShaderPrograms(std::vector<SerializedFileParse::ShaderSubProgram>& programs,
+                             int& programsTranslated, std::string& reason) {
+  int translated = 0;
+  for (auto& program : programs) {
+    if (SerializedFileParse::GpuProgramIsGlslSource(program.programType)) continue;
+    if (!IsTranslatableDirectXProgram(program.programType)) {
+      reason = "carries a " + std::string(SerializedFileParse::GpuProgramTypeName(program.programType)) +
+               " program, which is not DirectX bytecode";
+      return false;
+    }
+    auto const result = Vivify::Dxbc::TranslateDxbcToGlsl(
+        program.code.empty() ? nullptr : program.code.data(), program.code.size());
+    if (!result.ok) {
+      reason = result.error;
+      return false;
+    }
+    program.code.assign(result.source.begin(), result.source.end());
+    // Unity's GLES program types do not distinguish vertex from fragment; which
+    // stage a program is comes from the sub-program list that points at its
+    // blob index, and those are left exactly where they were.
+    program.programType = SerializedFileParse::kGpuProgramGLES3;
+    // The statistics block describes register and instruction counts for a
+    // program that no longer exists. Unity does not need it to link a GLES
+    // shader, and leaving DirectX numbers in it would be a lie in the one place
+    // a reader would go looking.
+    program.stats.assign(program.stats.size(), 0u);
+    translated++;
+  }
+  if (translated == 0) {
+    reason = "has no DirectX programs to translate";
+    return false;
+  }
+  programsTranslated += translated;
+  return true;
+}
+
+}  // namespace
+
+ShaderConversion ConvertShadersToGles(std::string const& sourcePath,
+                                      std::string const& destPath) {
+  ShaderConversion conversion;
+  ArchiveHeader header;
+  std::vector<DirectoryNode> nodes;
+  std::vector<uint8_t> data;
+  std::vector<TargetPlatformField> fields;
+  Result result;
+  if (!LoadAndScan(sourcePath, header, nodes, data, fields, result)) {
+    conversion.status = result.status;
+    conversion.message = result.message;
+    return conversion;
+  }
+
+  // Retarget first: the platform field is a fixed-width int inside each file's
+  // header, so it can be written before anything moves, and doing it here means
+  // a bundle whose shaders all refuse still comes out loadable.
+  int retargeted = 0;
+  for (auto const& field : fields) {
+    if (field.value == kBuildTargetAndroid) continue;
+    WriteU32(data.data() + field.offset, static_cast<uint32_t>(kBuildTargetAndroid),
+             field.bigEndian);
+    retargeted++;
+  }
+
+  constexpr size_t kMaxLoggedRefusals = 8;
+  int filesRewritten = 0;
+  for (size_t index = 0; index < nodes.size(); index++) {
+    if (nodes[index].offset > data.size() ||
+        nodes[index].size > data.size() - nodes[index].offset) {
+      conversion.status = Status::Corrupt;
+      conversion.message = "directory node '" + nodes[index].path + "' points outside the data";
+      return conversion;
+    }
+    uint8_t const* const nodeData = data.data() + nodes[index].offset;
+    size_t const nodeSize = static_cast<size_t>(nodes[index].size);
+
+    auto file = SerializedFileParse::InspectSerializedFile(nodeData, nodeSize);
+    if (!file.isSerializedFile || file.shaders.empty()) continue;
+
+    std::vector<SerializedFileParse::ObjectEdit> edits;
+    for (auto const& shader : file.shaders) {
+      conversion.shadersSeen++;
+      bool alreadyRuns = false;
+      for (int32_t platform : shader.platforms) {
+        if (SerializedFileParse::ShaderPlatformRunsOnQuest(platform)) alreadyRuns = true;
+      }
+      if (alreadyRuns) {
+        conversion.shadersLeftAlone++;
+        continue;
+      }
+
+      auto decoded = SerializedFileParse::DecodeShaderPrograms(nodeData, nodeSize, shader);
+      if (!decoded.ok || decoded.programs.empty()) {
+        conversion.shadersRefused++;
+        if (conversion.refusals.size() < kMaxLoggedRefusals) {
+          conversion.refusals.push_back(
+              (shader.name.empty() ? std::string("<unnamed>") : shader.name) + ": " +
+              (decoded.message.empty() ? "no programs decoded" : decoded.message));
+        }
+        continue;
+      }
+
+      std::string reason;
+      int translatedHere = 0;
+      if (!TranslateShaderPrograms(decoded.programs, translatedHere, reason)) {
+        conversion.shadersRefused++;
+        if (conversion.refusals.size() < kMaxLoggedRefusals) {
+          conversion.refusals.push_back(
+              (shader.name.empty() ? std::string("<unnamed>") : shader.name) + ": " + reason);
+        }
+        continue;
+      }
+
+      std::vector<int32_t> platforms(shader.platforms.size(),
+                                     SerializedFileParse::kShaderPlatformGLES3Plus);
+      auto store = SerializedFileParse::EncodeShaderPrograms(platforms, decoded.programs);
+      auto rebuilt = SerializedFileParse::BuildShaderObjectBody(nodeData, nodeSize, shader,
+                                                                platforms, store);
+      if (!rebuilt.ok) {
+        conversion.shadersRefused++;
+        if (conversion.refusals.size() < kMaxLoggedRefusals) {
+          conversion.refusals.push_back(
+              (shader.name.empty() ? std::string("<unnamed>") : shader.name) + ": " +
+              rebuilt.message);
+        }
+        continue;
+      }
+      edits.push_back({shader.pathID, std::move(rebuilt.body)});
+      conversion.shadersTranslated++;
+      conversion.programsTranslated += translatedHere;
+    }
+
+    if (edits.empty()) continue;
+    auto rewritten = SerializedFileParse::RewriteSerializedFile(nodeData, nodeSize, edits);
+    if (!rewritten.ok) {
+      conversion.status = Status::Corrupt;
+      conversion.message = "could not rebuild '" + nodes[index].path + "': " + rewritten.message;
+      return conversion;
+    }
+    if (!ReplaceNodeData(nodes, data, index, rewritten.data)) {
+      conversion.status = Status::Corrupt;
+      conversion.message = "could not relay the archive around a rebuilt '" + nodes[index].path + "'";
+      return conversion;
+    }
+    filesRewritten++;
+  }
+
+  // Nothing to retarget and nothing translated means the bundle already runs
+  // here; writing a byte-for-byte copy of it would only cost storage on the
+  // headset and hide that fact from the caller.
+  if (retargeted == 0 && conversion.shadersTranslated == 0) {
+    conversion.status = Status::AlreadyAndroid;
+    conversion.message =
+        conversion.shadersRefused > 0
+            ? "already targets Android; " + std::to_string(conversion.shadersRefused) +
+                  " shader(s) could not be translated and were left as they were"
+            : "already targets Android and has no DirectX shaders to translate";
+    return conversion;
+  }
+
+  if (!WriteConverted(destPath, header, nodes, data, result)) {
+    conversion.status = result.status;
+    conversion.message = result.message;
+    return conversion;
+  }
+
+  conversion.status = Status::Success;
+  conversion.outputBytes = result.outputBytes;
+  conversion.message = "translated " + std::to_string(conversion.shadersTranslated) + " of " +
+                       std::to_string(conversion.shadersSeen) + " shader(s) (" +
+                       std::to_string(conversion.programsTranslated) + " program(s)) across " +
+                       std::to_string(filesRewritten) + " serialized file(s); " +
+                       std::to_string(conversion.shadersLeftAlone) + " already ran here, " +
+                       std::to_string(conversion.shadersRefused) + " left as they were";
+  return conversion;
 }
 
 ShaderScan ScanShaders(std::string const& bundlePath) {

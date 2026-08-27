@@ -526,9 +526,52 @@ exists today:
    `glslSource` counts programs stored as GLSL text, which are writable by
    string manipulation. `binary` counts the ones that need a real
    cross-compiler.
-3. **Cross-compile** each DXBC program to GLSL ES 3.x (or to SPIR-V via glslang,
-   under Vulkan), which means vendoring HLSLcc -- roughly 30k lines of C++ --
-   into an ARM64 Android mod.
+3. **Cross-compile** each DXBC program to GLSL ES. Done -- `VivifyDxbc.cpp`.
+
+   HLSLcc was the obvious route and is not the one taken. It is roughly 30k
+   lines built around Unity's own build system, and it would still have needed
+   the reflection-to-uniform mapping below bolted on afterwards. What is here
+   instead is a direct translator for the subset of Shader Model 4/5 that
+   Unity's compiler emits for the unlit, effect, raymarch and blit shaders a
+   Vivify map ships: the DXBC container (RDEF, ISGN/OSGN/OSG5, SHDR/SHEX), the
+   token stream, and a GLSL ES 3.00 emitter.
+
+   Two decisions carry most of the weight.
+
+   *Registers are typeless, so the translation is too.* Every temp becomes a
+   vec4 and integer work round-trips through `floatBitsToInt`/`intBitsToFloat`.
+   The same four bytes are read as float by one instruction and as int by the
+   next, so any model that infers a type per register has to be right every
+   time or it silently miscompiles. The bit-cast form is always right and the
+   driver's optimiser removes the casts.
+
+   *Constant buffers are rebuilt as named uniforms.* Unity binds material
+   properties by uniform name, so a shader that kept D3D's flat array of
+   float4s would link and then receive nothing. Every `cb0[k].c` is resolved
+   through the reflection data back to the variable covering that byte --
+   `_Color.y`, `_Points[3].x`, `hlslcc_mtx4x4unity_ObjectToWorld[2]` -- and the
+   components of one register are put back together as a swizzle when they all
+   land in the same variable. Matrices keep HLSLcc's `hlslcc_mtxRxC` prefix and
+   attributes and varyings are named `in_SEMANTIC#`/`vs_SEMANTIC#` for the same
+   reason: those are the names Unity's own GLES shaders use and the ones the
+   engine matches against.
+
+   Anything outside the subset fails by name -- "instruction 'swapc' is outside
+   the translated subset" -- rather than emitting plausible wrong GLSL, and a
+   shader that does not translate is left exactly as it was. It keeps its
+   DirectX programs, does not run here, and falls to the stand-in path, which
+   is what it would have done anyway.
+
+   `ConvertShadersToGles` is the whole thing end to end, and it is what the
+   on-device conversion runs (settings: "Translate Shaders On Conversion").
+
+   Tested by `tools/dxbc/`: 73 checks under ASan/UBSan against hand-assembled
+   containers, plus five end-to-end cases in `tools/bundleconvert/`. There is
+   no DirectX compiler on a Linux host and no Quest here, so the fixtures are
+   written from the format documentation rather than captured from fxc. That
+   proves the decoder reads what the format *says*, not what Microsoft's
+   compiler happens to emit -- a real limit, and the reason the setting has an
+   off position.
 4. **Re-serialize.** Done, both halves.
 
    `RewriteSerializedFile` rebuilds one file with objects' bodies replaced. The
@@ -549,14 +592,13 @@ exists today:
    runs a whole bundle through the path and the tests require the payload back
    unchanged.
 
-Step 3 is now the only one left. It is also the largest: vendoring HLSLcc into
-an ARM64 Android mod, and nothing in it can be verified without a Quest and real
-maps.
-
-None of this can be verified without a Quest and real maps, and a half-correct
-implementation would corrupt bundles that currently load and render with
-stand-in shading. So the parser landed first, with tests, and the rest is not
-claimed as working.
+All four steps are now written. What cannot be claimed is that the output is
+*correct*: the only way to know whether a translated shader draws what the
+mapper intended is to run a converted map on a headset. The parts that can be
+checked from here are checked -- every framing and bounds path, every
+truncation, hundreds of corruption trials, and the requirement that a converted
+bundle still parses and converts to nothing on a second pass -- and the parts
+that cannot are behind a setting that turns the translation off again.
 
 **What to check on a real map.** Every conversion now logs what the source
 bundle's shaders were actually built for:

@@ -18,12 +18,14 @@
 //   Meshes, prefabs, GameObject hierarchies, animations, animator controllers,
 //   audio, text assets and material *definitions* are stored in a
 //   platform-independent form and come through intact.
-//   Shaders and block-compressed textures do NOT: a Windows bundle carries
-//   DirectX shader bytecode and BC/DXT texture data, neither of which an
-//   Adreno GPU can consume. Converted bundles therefore render with Vivify's
-//   fallback-shader path (see Runtime::RepairMaterialShader) rather than the
-//   mapper's intended shading. It is a rescue path for maps that have no
-//   Android bundle yet, not a replacement for one.
+//   Shaders need translating, and ConvertShadersToGles does it: a Windows
+//   bundle carries DirectX bytecode, which is cross-compiled to GLSL ES (see
+//   VivifyDxbc) and written back into the bundle. A shader using anything
+//   outside the translated subset is left as it was and still falls to
+//   Vivify's stand-in path (see Runtime::RepairMaterialShader) at load time.
+//   Block-compressed textures still do NOT come through: BC/DXT data is not
+//   something an Adreno GPU can consume, and that conversion has not been
+//   written.
 //
 // The implementation is deliberately free of Unity/il2cpp dependencies so it
 // can be unit-tested on a host compiler.
@@ -133,6 +135,41 @@ struct ShaderScan {
   int undecodableShaders = 0;
   std::vector<int32_t> programTypes;  // union across every program, ascending
 };
+
+// What a shader-translating conversion did.
+struct ShaderConversion {
+  Status status = Status::Corrupt;
+  std::string message;
+  int shadersSeen = 0;
+  int shadersTranslated = 0;
+  int shadersLeftAlone = 0;   // already runnable here, or nothing to translate
+  int shadersRefused = 0;     // used something outside the translated subset
+  int programsTranslated = 0;
+  uint64_t outputBytes = 0;
+  // The first few reasons a shader was refused, for the log. Bounded on
+  // purpose: a bundle with two hundred unsupported shaders would otherwise put
+  // two hundred lines in a session log, all saying much the same thing.
+  std::vector<std::string> refusals;
+
+  bool ok() const { return status == Status::Success; }
+};
+
+// Reads a PC bundle, translates every DirectX shader program inside it to
+// GLSL ES, retargets the archive to Android, and writes the result to destPath.
+//
+// This is the whole conversion, end to end: locate the Shader assets, decode
+// their program store, cross-compile the bytecode (VivifyDxbc), re-encode the
+// store, rebuild each Shader object around it, and relay the archive around the
+// objects that changed size.
+//
+// A shader carrying anything outside the translated subset is left exactly as
+// it was rather than half-converted -- it keeps its DirectX programs, does not
+// run here, and falls to the stand-in path at load time, which is what it would
+// have done anyway. Success therefore does not mean every shader converted; it
+// means the bundle was rewritten and is loadable, and the counters say how much
+// of it will actually render.
+ShaderConversion ConvertShadersToGles(std::string const& sourcePath,
+                                      std::string const& destPath);
 
 ShaderScan ScanShaders(std::string const& bundlePath);
 

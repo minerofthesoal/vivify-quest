@@ -25,6 +25,7 @@ bool GetDisableVisualsInMultiplayer();
 bool GetDisableVRCenterAdjust();
 bool GetConvertPcBundlesOnDevice();
 bool GetStandInShading();
+bool GetTranslateShadersOnConversion();
 // Whether a map carrying the Vivify requirement still submits its score.
 // Submission gates replay recording, so turning it off leaves no replay behind.
 bool GetSubmitScoresOnVivifyMaps();

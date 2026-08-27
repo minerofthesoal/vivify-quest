@@ -46,7 +46,7 @@ jobs:
         g++ -std=c++20 -O1 -g -fsanitize=address,undefined \
             -I include -o /tmp/conv \
             tools/bundleconvert/main.cpp src/VivifyBundleConvert.cpp \
-            src/VivifySerializedFile.cpp
+            src/VivifySerializedFile.cpp src/VivifyDxbc.cpp
 
     - name: Round-trip and structure tests
       working-directory: tools/bundleconvert
