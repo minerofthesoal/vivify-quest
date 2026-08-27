@@ -138,6 +138,8 @@ private:
   UnityEngine::RenderTextureFormat SupportedRenderTextureFormat(UnityEngine::RenderTextureFormat requested,
                                                                 std::string_view context) const;
   void LogMaterialShader(std::string_view context, std::string_view assetPath, UnityEngine::Material* material) const;
+  // Asset lookup without the miss warning, for searches whose misses are normal.
+  UnityEngine::Object* LookUpAsset(std::string_view assetName) const;
   UnityEngine::Shader* FindUsableShader(std::string const& shaderName) const;
   UnityEngine::Shader* FindFallbackShader();
   // Returns a GPU-usable stand-in for a block-compressed texture this device
