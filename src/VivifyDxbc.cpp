@@ -2,8 +2,11 @@
 
 #include <algorithm>
 #include <climits>
+#include <deque>
 #include <cstdio>
 #include <cstring>
+#include <deque>
+#include <set>
 
 namespace Vivify::Dxbc {
 namespace {
@@ -152,7 +155,23 @@ enum : uint32_t {
   OP_DCL_UAV_TYPED = 156, OP_DCL_UAV_RAW = 157, OP_DCL_UAV_STRUCTURED = 158,
   OP_DCL_TGSM_RAW = 159, OP_DCL_TGSM_STRUCTURED = 160, OP_DCL_RESOURCE_RAW = 161,
   OP_DCL_RESOURCE_STRUCTURED = 162,
-  OP_COUNT = 216,
+  OP_LD_UAV_TYPED = 163, OP_STORE_UAV_TYPED = 164, OP_LD_RAW = 165, OP_STORE_RAW = 166,
+  OP_LD_STRUCTURED = 167, OP_STORE_STRUCTURED = 168,
+  OP_ATOMIC_AND = 169, OP_ATOMIC_OR = 170, OP_ATOMIC_XOR = 171, OP_ATOMIC_CMP_STORE = 172,
+  OP_ATOMIC_IADD = 173, OP_ATOMIC_IMAX = 174, OP_ATOMIC_IMIN = 175, OP_ATOMIC_UMAX = 176,
+  OP_ATOMIC_UMIN = 177,
+  OP_IMM_ATOMIC_ALLOC = 178, OP_IMM_ATOMIC_CONSUME = 179, OP_IMM_ATOMIC_IADD = 180,
+  OP_IMM_ATOMIC_AND = 181, OP_IMM_ATOMIC_OR = 182, OP_IMM_ATOMIC_XOR = 183,
+  OP_IMM_ATOMIC_EXCH = 184, OP_IMM_ATOMIC_CMP_EXCH = 185, OP_IMM_ATOMIC_IMAX = 186,
+  OP_IMM_ATOMIC_IMIN = 187, OP_IMM_ATOMIC_UMAX = 188, OP_IMM_ATOMIC_UMIN = 189,
+  OP_SYNC = 190,
+  OP_DADD = 191, OP_DMAX = 192, OP_DMIN = 193, OP_DMUL = 194, OP_DEQ = 195, OP_DGE = 196,
+  OP_DLT = 197, OP_DNE = 198, OP_DMOV = 199, OP_DMOVC = 200, OP_DTOF = 201, OP_FTOD = 202,
+  OP_EVAL_SNAPPED = 203, OP_EVAL_SAMPLE_INDEX = 204, OP_EVAL_CENTROID = 205,
+  OP_DCL_GS_INSTANCE_COUNT = 206, OP_ABORT = 207, OP_DEBUG_BREAK = 208, OP_RESERVED2 = 209,
+  OP_DDIV = 210, OP_DFMA = 211, OP_DRCP = 212, OP_MSAD = 213, OP_DTOI = 214, OP_DTOU = 215,
+  OP_ITOD = 216, OP_UTOD = 217,
+  OP_COUNT = 218,
 };
 
 struct OpcodeEntry {
@@ -216,6 +235,26 @@ OpcodeEntry const& OpcodeInfo(uint32_t opcode) {
       {"dcl_uav_typed", 1}, {"dcl_uav_raw", 1}, {"dcl_uav_structured", 1},
       {"dcl_tgsm_raw", 1}, {"dcl_tgsm_structured", 1}, {"dcl_resource_raw", 1},
       {"dcl_resource_structured", 1},
+      {"ld_uav_typed", 3},        {"store_uav_typed", 3},   {"ld_raw", 3},
+      {"store_raw", 3},           {"ld_structured", 4},     {"store_structured", 4},
+      {"atomic_and", 3},          {"atomic_or", 3},         {"atomic_xor", 3},
+      {"atomic_cmp_store", 4},    {"atomic_iadd", 3},       {"atomic_imax", 3},
+      {"atomic_imin", 3},         {"atomic_umax", 3},       {"atomic_umin", 3},
+      {"imm_atomic_alloc", 2},    {"imm_atomic_consume", 2}, {"imm_atomic_iadd", 4},
+      {"imm_atomic_and", 4},      {"imm_atomic_or", 4},     {"imm_atomic_xor", 4},
+      {"imm_atomic_exch", 4},     {"imm_atomic_cmp_exch", 5}, {"imm_atomic_imax", 4},
+      {"imm_atomic_imin", 4},     {"imm_atomic_umax", 4},   {"imm_atomic_umin", 4},
+      {"sync", 0},
+      {"dadd", 3},                {"dmax", 3},              {"dmin", 3},
+      {"dmul", 3},                {"deq", 3},               {"dge", 3},
+      {"dlt", 3},                 {"dne", 3},               {"dmov", 2},
+      {"dmovc", 4},               {"dtof", 2},              {"ftod", 2},
+      {"eval_snapped", 3},        {"eval_sample_index", 3}, {"eval_centroid", 2},
+      {"dcl_gs_instance_count", 0}, {"abort", 0},           {"debug_break", 0},
+      {"reserved2", -1},
+      {"ddiv", 3},                {"dfma", 4},              {"drcp", 2},
+      {"msad", 4},                {"dtoi", 2},              {"dtou", 2},
+      {"itod", 2},                {"utod", 2},
   };
   constexpr size_t tableSize = sizeof(table) / sizeof(table[0]);
   if (opcode >= tableSize) return unknown;
@@ -588,11 +627,26 @@ bool DecodeInstructions(uint8_t const* code, size_t codeSize, Program& program) 
       if (!reader.Ok()) return false;
       extendedCount++;
       if (extendedCount > 8) return false;
-      instruction.extra.push_back(extendedToken);
+      instruction.extendedTokens.push_back(extendedToken);
+      // D3D10_SB_EXTENDED_OPCODE_TYPE 1 is SAMPLE_CONTROLS: a compile-time
+      // texel offset on a fetch, held as three 4-bit signed fields. It changes
+      // which texel is read, so it is decoded here rather than stepped over.
+      if ((extendedToken & 0x3fu) == 1) {
+        auto signExtend4 = [](uint32_t value) -> int32_t {
+          value &= 0xfu;
+          return static_cast<int32_t>(value >= 8u ? value - 16u : value);
+        };
+        instruction.hasSampleOffsets = true;
+        instruction.sampleOffsetU = signExtend4(extendedToken >> 9);
+        instruction.sampleOffsetV = signExtend4(extendedToken >> 13);
+        instruction.sampleOffsetW = signExtend4(extendedToken >> 17);
+        if (instruction.sampleOffsetU == 0 && instruction.sampleOffsetV == 0 &&
+            instruction.sampleOffsetW == 0) {
+          instruction.hasSampleOffsets = false;
+        }
+      }
       extended = (extendedToken & 0x80000000u) != 0;
     }
-    // Extended tokens are recorded separately from the trailing dwords below.
-    size_t const extendedTokens = instruction.extra.size();
 
     auto const& info = OpcodeInfo(instruction.opcode);
     if (info.operandCount > 0) {
@@ -612,21 +666,24 @@ bool DecodeInstructions(uint8_t const* code, size_t codeSize, Program& program) 
 
     switch (instruction.opcode) {
       case OP_DCL_TEMPS:
-        if (instruction.extra.size() > extendedTokens) {
-          program.tempCount = std::max(program.tempCount, instruction.extra[extendedTokens]);
+        if (!instruction.extra.empty()) {
+          program.tempCount = std::max(program.tempCount, instruction.extra[0]);
         }
         break;
       case OP_DCL_INDEXABLE_TEMP:
-        if (instruction.extra.size() >= extendedTokens + 3) {
+        if (instruction.extra.size() >= 3) {
           Program::IndexableTemp temp;
-          temp.index = instruction.extra[extendedTokens];
-          temp.arraySize = instruction.extra[extendedTokens + 1];
-          temp.components = instruction.extra[extendedTokens + 2];
+          temp.index = instruction.extra[0];
+          temp.arraySize = instruction.extra[1];
+          temp.components = instruction.extra[2];
           program.indexableTemps.push_back(temp);
         }
         break;
       case OP_DCL_GLOBAL_FLAGS:
         program.globalFlags = instruction.controls;
+        break;
+      case OP_DCL_MAX_OUTPUT_VERTEX_COUNT:
+        if (!instruction.extra.empty()) program.maxOutputVertexCount = instruction.extra[0];
         break;
       default:
         break;
@@ -882,7 +939,12 @@ std::string DisassembleProgram(Program const& program) {
          std::to_string(program.minorVersion) + "\n";
   for (auto const& instruction : program.instructions) {
     out += OpcodeName(instruction.opcode);
-    if (instruction.saturate) out += "_sat";
+    // Bit 13 of the opcode token is saturate only for a value-producing
+    // instruction. A declaration uses the whole controls field for its own
+    // meaning, and printing _sat for one would read as a flag that is not there.
+    bool const isDeclaration = instruction.opcode >= OP_DCL_RESOURCE &&
+                               instruction.opcode <= OP_DCL_GLOBAL_FLAGS;
+    if (instruction.saturate && !isDeclaration) out += "_sat";
     for (size_t i = 0; i < instruction.operands.size(); i++) {
       out += i == 0 ? " " : ", ";
       out += FormatOperand(instruction.operands[i]);
@@ -901,6 +963,7 @@ std::string DisassembleProgram(Program const& program) {
   return out;
 }
 
+
 // ---------------------------------------------------------------------------
 // GLSL ES emission
 // ---------------------------------------------------------------------------
@@ -911,6 +974,15 @@ std::string DisassembleProgram(Program const& program) {
 // instruction and as int by the next -- and any model that tries to infer a
 // type per register has to be right every time or it silently miscompiles. The
 // bit-cast form is always right, and the driver's optimiser removes the casts.
+//
+// The output version is not fixed. GLSL ES 3.00 covers an ordinary vertex or
+// fragment shader; textureGather, uaddCarry, imulExtended, multisample fetches
+// and storage buffers are 3.10; geometry shaders and textureGatherOffset are
+// 3.20. The emitter raises the version it asks for as it meets an instruction
+// that needs one, so a plain shader stays at 300 and a compute or geometry
+// shader gets what it requires. Quest's Adreno parts expose GLES 3.2 and Unity
+// compiles the source on the device, so this costs nothing where it is not
+// needed.
 
 namespace {
 
@@ -918,18 +990,15 @@ std::string FormatFloatLiteral(uint32_t bits) {
   float value = 0.0f;
   std::memcpy(&value, &bits, 4);
   // A NaN or infinity cannot be written as a GLSL literal at all. They do turn
-  // up in real shaders as "unused component" filler, so they become zero rather
-  // than stopping the translation -- but only when nothing reads them would
-  // that be safe, and that is not knowable here, so it is recorded as a
-  // literal 0.0 and the shader is still emitted.
-  if (!(value == value) || value > 3.4e38f || value < -3.4e38f) {
-    return value > 0.0f ? "3.402823466e+38" : (value < 0.0f ? "-3.402823466e+38" : "0.0");
-  }
+  // up in real shaders as "unused component" filler, so they become the largest
+  // finite value of the same sign rather than stopping the translation.
+  if (!(value == value)) return "0.0";
+  if (value > 3.4e38f) return "3.402823466e+38";
+  if (value < -3.4e38f) return "-3.402823466e+38";
   char buffer[64];
   std::snprintf(buffer, sizeof(buffer), "%.9g", static_cast<double>(value));
   std::string text = buffer;
-  if (text.find('.') == std::string::npos && text.find('e') == std::string::npos &&
-      text.find("inf") == std::string::npos && text.find("nan") == std::string::npos) {
+  if (text.find('.') == std::string::npos && text.find('e') == std::string::npos) {
     text += ".0";
   }
   return text;
@@ -979,10 +1048,34 @@ struct MappedVariable {
   bool integerTyped = false;
 };
 
+// A bound texture, as declared. D3D separates textures from samplers; GLSL ES
+// has only the combined form, and Unity resolves it the same way -- one
+// sampler named after the texture -- so a material's _MainTex still binds.
+struct MappedTexture {
+  std::string name;
+  uint32_t dimension = 0;   // D3D_SRV_DIMENSION
+  int coordinateComponents = 0;
+  bool comparison = false;  // declared as a shadow sampler
+  bool multisample = false;
+};
+
+// A read/write resource: a D3D UAV, or a structured/raw shader resource. These
+// only appear in compute shaders in practice, and GLSL ES expresses them as
+// images (typed) or storage buffers (raw and structured).
+struct MappedStorage {
+  std::string name;
+  std::string blockName;
+  uint32_t bindPoint = 0;
+  bool typedImage = false;   // image2D/image3D rather than a buffer
+  uint32_t dimension = 0;
+  uint32_t stride = 0;       // structured buffers: bytes per element
+  bool writable = false;
+};
+
 class GlslEmitter {
  public:
   GlslEmitter(Program const& program, GlslOptions const& options)
-      : _program(program), _options(options) {}
+      : _program(program), _options(options), _version(options.version) {}
 
   GlslResult Run();
 
@@ -995,9 +1088,24 @@ class GlslEmitter {
     _error = std::move(reason);
   }
 
+  // Raises the GLSL ES version the output will declare. `why` names the
+  // construct, so a shader that needs more than the ceiling says what pushed it
+  // over rather than just failing.
+  bool Require(int version, char const* why) {
+    if (version <= _version) return true;
+    if (version > _options.maximumVersion) {
+      Fail(std::string(why) + " needs GLSL ES " + std::to_string(version / 100) + "." +
+           std::to_string((version % 100) / 10) + ", above the ceiling this build allows");
+      return false;
+    }
+    _version = version;
+    return true;
+  }
+
   bool BuildConstantBuffers();
   bool BuildResources();
   bool BuildSignatures();
+  bool BuildStageDeclarations();
   bool EmitBody();
   bool EmitInstruction(Instruction const& instruction);
 
@@ -1007,37 +1115,74 @@ class GlslEmitter {
   std::string SrcUint(Operand const& operand, uint8_t mask);
   std::string ScalarFloat(Operand const& operand);  // first selected component
   std::string ScalarInt(Operand const& operand);
+  std::string ScalarUint(Operand const& operand);
   std::string RegisterName(Operand const& operand);
   std::string ConstantComponent(Operand const& operand, int component);
   std::string DestName(Operand const& operand, uint8_t& mask);
   void WriteDest(Instruction const& instruction, Operand const& dest, std::string const& expression);
   void Line(std::string const& text);
 
+  MappedTexture const* TextureFor(Operand const& resource);
+  MappedStorage const* StorageFor(Operand const& operand);
+  std::string SampleOffsetArgument(Instruction const& instruction, int components);
+  std::string ResourceSwizzle(Operand const& resource, uint8_t mask);
+
   SignatureElement const* FindSignature(std::vector<SignatureElement> const& signature,
                                         uint32_t registerIndex) const;
   std::string VaryingName(SignatureElement const& element, bool vertexInput) const;
+  std::string InterpolationQualifier(uint32_t registerIndex) const;
 
   Program const& _program;
   GlslOptions _options;
 
   std::string _declarations;
-  std::string _body;
+  std::string _body;       // main()'s statements
+  std::string _functions;  // subroutine bodies, emitted before main()
+  std::string _subroutineBody;
+  std::string* _target = &_body;
   int _indent = 1;
   bool _failed = false;
   std::string _error;
+  int _version = 300;
 
   std::vector<std::vector<MappedVariable>> _constantBuffers;  // by cb bind point
-  std::vector<std::string> _samplerNames;                     // by t# register
-  std::vector<uint32_t> _samplerDimensions;                   // by t# register
+  std::vector<MappedTexture> _textures;                       // by t# register
+  std::vector<MappedStorage> _storage;                        // by u# register
+  std::vector<MappedStorage> _rawResources;                   // by t# register
+  // Shared-memory blocks, built on first use because the instruction stream
+  // declares them rather than the reflection data. A deque, not a vector, so a
+  // pointer handed out earlier survives a later insertion.
+  std::deque<MappedStorage> _sharedStorage;
   std::vector<std::string> _uniformNames;
   std::vector<std::string> _samplerList;
+  // Which GLSL built-ins the body reached for. Each becomes a vec4 alias
+  // declared at the top of main(), so the rest of the emitter can treat
+  // gl_VertexID and r0 as the same kind of thing -- a typeless four-component
+  // register -- instead of special-casing every read of one.
   bool _usedImmediateConstantBuffer = false;
+  bool _usedFrontFace = false;
+  bool _usedVertexID = false;
+  bool _usedInstanceID = false;
+  bool _usedPrimitiveID = false;
+  bool _usedSampleIndex = false;
+  bool _usedThreadID = false;
+  bool _usedThreadGroupID = false;
+  bool _usedThreadIDInGroup = false;
+  bool _usedThreadIDFlattened = false;
+  bool _usedGsInstanceID = false;
+  // Thread-group shared memory, one entry per declared block.
+  struct SharedBlock {
+    uint32_t index = 0;
+    uint32_t elements = 0;
+    uint32_t stride = 0;
+  };
+  std::vector<SharedBlock> _sharedBlocks;
 };
 
 void GlslEmitter::Line(std::string const& text) {
-  _body.append(static_cast<size_t>(_indent) * 2, ' ');
-  _body += text;
-  _body += '\n';
+  _target->append(static_cast<size_t>(_indent) * 2, ' ');
+  *_target += text;
+  *_target += '\n';
 }
 
 SignatureElement const* GlslEmitter::FindSignature(std::vector<SignatureElement> const& signature,
@@ -1050,7 +1195,7 @@ SignatureElement const* GlslEmitter::FindSignature(std::vector<SignatureElement>
 
 // Unity's GLES shaders name vertex attributes in_SEMANTIC# and inter-stage
 // varyings vs_SEMANTIC#, and the engine binds them back by exactly those names.
-// A translated shader that named them anything else would link but receive
+// A translated shader that named them anything else would link and then receive
 // nothing.
 std::string GlslEmitter::VaryingName(SignatureElement const& element, bool vertexInput) const {
   std::string name = element.semanticName;
@@ -1058,6 +1203,35 @@ std::string GlslEmitter::VaryingName(SignatureElement const& element, bool verte
     if (!((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9'))) c = '_';
   }
   return (vertexInput ? "in_" : "vs_") + name + std::to_string(element.semanticIndex);
+}
+
+// dcl_input_ps carries the interpolation mode in its opcode controls. Getting
+// this wrong is not cosmetic: an integer varying interpolated linearly is
+// garbage on arrival, and D3D marks those "constant" for exactly that reason.
+std::string GlslEmitter::InterpolationQualifier(uint32_t registerIndex) const {
+  for (auto const& instruction : _program.instructions) {
+    if (instruction.opcode != OP_DCL_INPUT_PS && instruction.opcode != OP_DCL_INPUT_PS_SGV &&
+        instruction.opcode != OP_DCL_INPUT_PS_SIV) {
+      continue;
+    }
+    if (instruction.operands.empty() || instruction.operands[0].indices.empty()) continue;
+    if (static_cast<uint32_t>(instruction.operands[0].indices.back().immediate) != registerIndex) {
+      continue;
+    }
+    // D3D10_SB_INTERPOLATION_MODE lives in bits 11..14 of the opcode token,
+    // which is bits 0..3 of the controls field.
+    switch (instruction.controls & 0xfu) {
+      case 1: return "flat ";        // CONSTANT
+      case 2: return "";             // LINEAR
+      case 3: return "centroid ";    // LINEAR_CENTROID
+      case 4: return "";             // LINEAR_NOPERSPECTIVE (GLSL ES has none)
+      case 5: return "centroid ";    // LINEAR_NOPERSPECTIVE_CENTROID
+      case 6: return "";             // LINEAR_SAMPLE
+      case 7: return "";             // LINEAR_NOPERSPECTIVE_SAMPLE
+      default: return "";
+    }
+  }
+  return "";
 }
 
 }  // namespace
@@ -1097,7 +1271,6 @@ bool GlslEmitter::BuildConstantBuffers() {
         prefix = "i";
         integerTyped = true;
       }
-      entry.scalarDeclaration = false;
 
       if (isMatrix) {
         uint32_t const slots = (variable.size + 15u) / 16u;
@@ -1142,10 +1315,10 @@ bool GlslEmitter::BuildConstantBuffers() {
           return false;
         }
         entry.name = variable.name;
-        entry.componentCount = static_cast<int>(columns);
+        entry.componentCount = columns;
         entry.scalarDeclaration = columns == 1;
-        entry.declaration =
-            "uniform " + VecType(static_cast<int>(columns), prefix) + " " + entry.name + ";";
+        entry.declaration = "uniform " + VecType(static_cast<int>(columns), prefix) + " " +
+                            entry.name + ";";
       }
       entry.elementStride = entry.elementStride == 0 ? 16 : entry.elementStride;
       entry.componentCount = entry.componentCount == 0 ? 1 : entry.componentCount;
@@ -1165,87 +1338,398 @@ bool GlslEmitter::BuildConstantBuffers() {
 }
 
 bool GlslEmitter::BuildResources() {
+  // Which textures are read through a comparison fetch, and which through a
+  // multisample one. RDEF does not say; the instruction stream does, and a
+  // shadow sampler declared as a plain one silently returns the wrong thing.
+  std::set<uint32_t> comparisonTextures;
+  for (auto const& instruction : _program.instructions) {
+    bool const isComparison = instruction.opcode == OP_SAMPLE_C ||
+                              instruction.opcode == OP_SAMPLE_C_LZ ||
+                              instruction.opcode == OP_GATHER4_C ||
+                              instruction.opcode == OP_GATHER4_PO_C;
+    if (!isComparison) continue;
+    size_t const resourceIndex = instruction.opcode == OP_GATHER4_PO_C ? 3u : 2u;
+    if (instruction.operands.size() <= resourceIndex) continue;
+    auto const& resource = instruction.operands[resourceIndex];
+    if (resource.type != kOperandResource || resource.indices.empty()) continue;
+    comparisonTextures.insert(static_cast<uint32_t>(resource.indices.back().immediate));
+  }
+
   for (auto const& binding : _program.resourceBindings) {
-    if (binding.type != 2) continue;  // D3D_SIT_TEXTURE
+    switch (binding.type) {
+      case 2:  // D3D_SIT_TEXTURE
+        break;
+      case 0:  // cbuffer, handled by BuildConstantBuffers
+      case 3:  // sampler, folded into the texture below
+        continue;
+      case 5:   // STRUCTURED
+      case 7:   // BYTEADDRESS
+      case 4:   // UAV_RWTYPED
+      case 6:   // UAV_RWSTRUCTURED
+      case 8:   // UAV_RWBYTEADDRESS
+      case 11: {  // UAV_RWSTRUCTURED_WITH_COUNTER
+        if (!Require(310, "a read/write or structured buffer")) return false;
+        bool const writable = binding.type == 4 || binding.type == 6 || binding.type == 8 ||
+                              binding.type == 11;
+        MappedStorage storage;
+        storage.name = binding.name;
+        storage.blockName = binding.name + "_block";
+        storage.bindPoint = binding.bindPoint;
+        storage.writable = writable;
+        storage.dimension = binding.dimension;
+        storage.typedImage = binding.type == 4;
+        if (storage.typedImage) {
+          char const* format = nullptr;
+          char const* type = nullptr;
+          switch (binding.returnType) {
+            case 3: format = "rgba32i"; type = "iimage"; break;   // SINT
+            case 4: format = "rgba32ui"; type = "uimage"; break;  // UINT
+            case 1: case 2: case 5: format = "rgba32f"; type = "image"; break;
+            default: break;
+          }
+          char const* shape = nullptr;
+          switch (binding.dimension) {
+            case 4: shape = "2D"; break;
+            case 5: shape = "2DArray"; break;
+            case 8: shape = "3D"; break;
+            default: break;
+          }
+          if (format == nullptr || shape == nullptr) {
+            Fail("read/write texture '" + binding.name +
+                 "' has a format or dimension GLSL ES has no image type for");
+            return false;
+          }
+          _declarations += "layout(binding = " + std::to_string(binding.bindPoint) + ", " +
+                           format + ") uniform highp " + type + shape + " " + binding.name + ";\n";
+        } else {
+          // Raw and structured buffers both become a storage buffer of uints:
+          // the bytecode addresses them by byte or element offset and casts
+          // whatever it finds, exactly as it does with registers.
+          _declarations += "layout(std430, binding = " + std::to_string(binding.bindPoint) +
+                           ") " + (writable ? "buffer " : "readonly buffer ") + storage.blockName +
+                           " { uint " + binding.name + "[]; };\n";
+        }
+        auto& into = (binding.type == 5 || binding.type == 7) ? _rawResources : _storage;
+        if (into.size() <= binding.bindPoint) into.resize(binding.bindPoint + 1);
+        into[binding.bindPoint] = std::move(storage);
+        continue;
+      }
+      default:
+        Fail("bound resource '" + binding.name + "' is of a kind (" +
+             std::to_string(binding.type) + ") this translator has no GLSL ES form for");
+        return false;
+    }
+
     if (binding.bindPoint > 64) {
       Fail("texture bound at register t" + std::to_string(binding.bindPoint));
       return false;
     }
-    if (_samplerNames.size() <= binding.bindPoint) {
-      _samplerNames.resize(binding.bindPoint + 1);
-      _samplerDimensions.resize(binding.bindPoint + 1, 0);
-    }
-    char const* samplerType = nullptr;
+    if (_textures.size() <= binding.bindPoint) _textures.resize(binding.bindPoint + 1);
+
+    MappedTexture texture;
+    texture.name = binding.name;
+    texture.dimension = binding.dimension;
+    texture.comparison = comparisonTextures.count(binding.bindPoint) != 0;
+
+    std::string shape;
     switch (binding.dimension) {
-      case 4: samplerType = "sampler2D"; break;
-      case 5: samplerType = "sampler2DArray"; break;
-      case 8: samplerType = "sampler3D"; break;
-      case 9: samplerType = "samplerCube"; break;
-      default: break;
+      case 4: shape = "2D"; texture.coordinateComponents = 2; break;
+      case 5: shape = "2DArray"; texture.coordinateComponents = 3; break;
+      case 6:
+        shape = "2DMS";
+        texture.coordinateComponents = 2;
+        texture.multisample = true;
+        if (!Require(310, "a multisample texture")) return false;
+        break;
+      case 7:
+        shape = "2DMSArray";
+        texture.coordinateComponents = 3;
+        texture.multisample = true;
+        if (!Require(320, "a multisample texture array")) return false;
+        break;
+      case 8: shape = "3D"; texture.coordinateComponents = 3; break;
+      case 9: shape = "Cube"; texture.coordinateComponents = 3; break;
+      case 10:
+        shape = "CubeArray";
+        texture.coordinateComponents = 4;
+        if (!Require(320, "a cube texture array")) return false;
+        break;
+      case 1:
+        shape = "Buffer";
+        texture.coordinateComponents = 1;
+        if (!Require(320, "a texture buffer")) return false;
+        break;
+      default:
+        Fail("texture '" + binding.name + "' has a dimension GLSL ES has no sampler for (" +
+             std::to_string(binding.dimension) + ")");
+        return false;
     }
-    if (samplerType == nullptr) {
-      Fail("texture '" + binding.name + "' has a dimension GLSL ES has no sampler for (" +
-           std::to_string(binding.dimension) + ")");
+    if (texture.comparison && texture.multisample) {
+      Fail("texture '" + binding.name + "' is fetched both as a shadow map and a multisample "
+           "target, which no GLSL ES sampler type covers");
       return false;
     }
-    // D3D separates textures from samplers; GLSL ES 3.00 has only the combined
-    // form. Unity resolves this the same way -- one combined sampler named
-    // after the texture -- so a material's _MainTex still binds.
-    _samplerNames[binding.bindPoint] = binding.name;
-    _samplerDimensions[binding.bindPoint] = binding.dimension;
-    _declarations += "uniform highp " + std::string(samplerType) + " " + binding.name + ";\n";
+
+    // The sampler's scalar type follows the resource's return type: an integer
+    // texture read through a float sampler would convert rather than reinterpret.
+    char const* typePrefix = "";
+    if (!texture.comparison) {
+      switch (binding.returnType) {
+        case 3: typePrefix = "i"; break;  // SINT
+        case 4: typePrefix = "u"; break;  // UINT
+        default: break;                   // UNORM/SNORM/FLOAT/MIXED all read as float
+      }
+    }
+    std::string const samplerType =
+        std::string(typePrefix) + "sampler" + shape + (texture.comparison ? "Shadow" : "");
+    _declarations += "uniform highp " + samplerType + " " + binding.name + ";\n";
     _samplerList.push_back(binding.name);
+    _textures[binding.bindPoint] = std::move(texture);
   }
   return !_failed;
 }
 
+}  // namespace
+
+namespace {
+
+// D3D_NAME (system value) numbers that appear in a signature.
+constexpr uint32_t kSvUndefined = 0;
+constexpr uint32_t kSvPosition = 1;
+constexpr uint32_t kSvClipDistance = 2;
+constexpr uint32_t kSvCullDistance = 3;
+constexpr uint32_t kSvRenderTargetArrayIndex = 4;
+constexpr uint32_t kSvVertexID = 6;
+constexpr uint32_t kSvPrimitiveID = 7;
+constexpr uint32_t kSvInstanceID = 8;
+constexpr uint32_t kSvIsFrontFace = 9;
+constexpr uint32_t kSvSampleIndex = 10;
+constexpr uint32_t kSvTarget = 64;
+constexpr uint32_t kSvDepth = 65;
+constexpr uint32_t kSvCoverage = 66;
+constexpr uint32_t kSvDepthGreaterEqual = 67;
+constexpr uint32_t kSvDepthLessEqual = 68;
+
 bool GlslEmitter::BuildSignatures() {
-  bool const isVertex = _program.stage == Stage::Vertex;
-  bool const isPixel = _program.stage == Stage::Pixel;
-  if (!isVertex && !isPixel) {
-    Fail("only vertex and fragment programs are translated, this is a " +
-         std::string(StageName(_program.stage)) + " program");
+  Stage const stage = _program.stage;
+  bool const isVertex = stage == Stage::Vertex;
+  bool const isPixel = stage == Stage::Pixel;
+  bool const isGeometry = stage == Stage::Geometry;
+  bool const isCompute = stage == Stage::Compute;
+
+  if (stage == Stage::Hull || stage == Stage::Domain) {
+    // A hull shader is not one program: it is a control-point phase plus fork
+    // and join phases with their own instruction streams and their own
+    // register spaces. Translating it wrong would be worse than not translating
+    // it, and no Vivify map has ever needed one on this target.
+    Fail("tessellation (" + std::string(StageName(stage)) +
+         ") programs are not translated; the shader keeps its DirectX programs");
     return false;
   }
+  if (stage == Stage::Unknown) {
+    Fail("the program header does not name a pipeline stage this translator knows");
+    return false;
+  }
+  if (isCompute) return true;  // compute has no signature; see BuildStageDeclarations
+  if (isGeometry && !Require(320, "a geometry shader")) return false;
 
   for (auto const& element : _program.inputSignature) {
-    // System-value inputs come from GLSL's own built-ins rather than a
-    // declared variable.
-    if (isPixel && element.systemValueType == 1) continue;   // SV_Position -> gl_FragCoord
-    if (element.systemValueType == 9) continue;              // SV_IsFrontFace
-    if (element.systemValueType != 0) {
-      Fail("input semantic '" + element.semanticName + "' is a system value this translator has "
-           "no GLSL equivalent for");
-      return false;
+    switch (element.systemValueType) {
+      case kSvUndefined:
+        break;
+      case kSvPosition:
+        if (isPixel || isGeometry) continue;  // gl_FragCoord / gl_in[].gl_Position
+        Fail("a vertex program declares SV_Position as an input");
+        return false;
+      case kSvIsFrontFace:
+      case kSvVertexID:
+      case kSvInstanceID:
+      case kSvPrimitiveID:
+        continue;  // GLSL built-ins, bound in the prologue
+      case kSvSampleIndex:
+        if (!Require(320, "SV_SampleIndex")) return false;
+        continue;
+      default:
+        Fail("input semantic '" + element.semanticName + "' is system value " +
+             std::to_string(element.systemValueType) +
+             ", which this translator has no GLSL ES equivalent for");
+        return false;
     }
     std::string const name = VaryingName(element, isVertex);
-    std::string const qualifier = isVertex ? "in " : "in ";
-    _declarations += qualifier + "vec4 " + name + ";\n";
+    if (isGeometry) {
+      // A geometry shader reads its inputs per vertex, so every varying is an
+      // array sized by the input primitive.
+      //
+      // Its outputs feed the fragment stage, which was compiled separately and
+      // expects the same vs_SEMANTIC# names the vertex stage writes -- so a
+      // geometry shader that passes a semantic straight through would have to
+      // declare one name as both an input and an output. That is not legal
+      // GLSL, and renaming either side breaks the link with a program this
+      // translator never sees. Programs are translated one at a time, so the
+      // pipeline-wide rename the name scheme would need is not available; the
+      // collision is reported instead of guessed at.
+      for (auto const& output : _program.outputSignature) {
+        if (output.systemValueType != kSvUndefined) continue;
+        if (VaryingName(output, false) != name) continue;
+        Fail("this geometry program passes '" + element.semanticName +
+             std::to_string(element.semanticIndex) +
+             "' through, which would need one varying name to be both its input and its "
+             "output; translating stages separately cannot rename it on both sides");
+        return false;
+      }
+      _declarations += "in vec4 " + name + "[];\n";
+    } else {
+      _declarations += InterpolationQualifier(element.registerIndex) + "in vec4 " + name + ";\n";
+    }
   }
 
   for (auto const& element : _program.outputSignature) {
-    if (isVertex && element.systemValueType == 1) continue;  // SV_Position -> gl_Position
-    if (isPixel) {
-      // A pixel shader's outputs are render targets; SV_Depth arrives as an
-      // operand type rather than a signature entry.
-      if (element.systemValueType != 0) {
-        Fail("output semantic '" + element.semanticName + "' is a system value this translator "
-             "has no GLSL equivalent for");
+    switch (element.systemValueType) {
+      case kSvUndefined:
+        break;
+      case kSvPosition:
+        continue;  // gl_Position
+      case kSvTarget:
+        break;
+      case kSvDepth:
+      case kSvDepthGreaterEqual:
+      case kSvDepthLessEqual:
+      case kSvCoverage:
+        continue;  // gl_FragDepth / gl_SampleMask, written through operand types
+      case kSvRenderTargetArrayIndex:
+        if (!Require(320, "SV_RenderTargetArrayIndex")) return false;
+        continue;  // gl_Layer
+      case kSvClipDistance:
+      case kSvCullDistance:
+        // gl_ClipDistance is not in GLSL ES without an extension, and silently
+        // dropping a clip plane draws geometry that should have been cut away.
+        Fail("output semantic '" + element.semanticName +
+             "' needs clip/cull distances, which GLSL ES does not have");
         return false;
-      }
+      default:
+        Fail("output semantic '" + element.semanticName + "' is system value " +
+             std::to_string(element.systemValueType) +
+             ", which this translator has no GLSL ES equivalent for");
+        return false;
+    }
+
+    if (isPixel) {
       _declarations += "layout(location = " + std::to_string(element.registerIndex) +
                        ") out vec4 " + element.semanticName +
                        std::to_string(element.semanticIndex) + ";\n";
       continue;
     }
-    if (element.systemValueType != 0) {
-      Fail("vertex output semantic '" + element.semanticName +
-           "' is a system value this translator has no GLSL equivalent for");
-      return false;
-    }
     _declarations += "out vec4 " + VaryingName(element, false) + ";\n";
   }
   return !_failed;
+}
+
+// The per-stage layout declarations that are not signatures: a compute
+// shader's work-group size and shared memory, a geometry shader's input and
+// output primitives.
+bool GlslEmitter::BuildStageDeclarations() {
+  for (auto const& instruction : _program.instructions) {
+    switch (instruction.opcode) {
+      case OP_DCL_THREAD_GROUP: {
+        if (instruction.extra.size() < 3) {
+          Fail("dcl_thread_group without its three sizes");
+          return false;
+        }
+        if (!Require(310, "a compute shader")) return false;
+        _declarations += "layout(local_size_x = " + std::to_string(instruction.extra[0]) +
+                         ", local_size_y = " + std::to_string(instruction.extra[1]) +
+                         ", local_size_z = " + std::to_string(instruction.extra[2]) + ") in;\n";
+        break;
+      }
+      case OP_DCL_TGSM_RAW:
+      case OP_DCL_TGSM_STRUCTURED: {
+        if (!Require(310, "thread group shared memory")) return false;
+        if (instruction.operands.empty() || instruction.operands[0].indices.empty()) {
+          Fail("a shared memory declaration with no register");
+          return false;
+        }
+        SharedBlock block;
+        block.index = static_cast<uint32_t>(instruction.operands[0].indices.back().immediate);
+        if (instruction.opcode == OP_DCL_TGSM_RAW) {
+          if (instruction.extra.empty()) {
+            Fail("dcl_tgsm_raw without a byte count");
+            return false;
+          }
+          block.stride = 4;
+          block.elements = instruction.extra[0] / 4u;
+        } else {
+          if (instruction.extra.size() < 2) {
+            Fail("dcl_tgsm_structured without a stride and count");
+            return false;
+          }
+          block.stride = instruction.extra[0];
+          block.elements = instruction.extra[1] * (block.stride / 4u);
+        }
+        if (block.elements == 0 || block.elements > (1u << 20)) {
+          Fail("a shared memory block of an impossible size");
+          return false;
+        }
+        _declarations += "shared uint g" + std::to_string(block.index) + "[" +
+                         std::to_string(block.elements) + "];\n";
+        _sharedBlocks.push_back(block);
+        break;
+      }
+      case OP_DCL_GS_INPUT_PRIMITIVE: {
+        char const* primitive = nullptr;
+        switch (instruction.controls & 0x3fu) {
+          case 1: primitive = "points"; break;
+          case 2: primitive = "lines"; break;
+          case 3: primitive = "triangles"; break;
+          case 6: primitive = "lines_adjacency"; break;
+          case 7: primitive = "triangles_adjacency"; break;
+          default: break;
+        }
+        if (primitive == nullptr) {
+          Fail("a geometry shader input primitive GLSL ES has no layout for");
+          return false;
+        }
+        _declarations += "layout(" + std::string(primitive) + ") in;\n";
+        break;
+      }
+      case OP_DCL_GS_OUTPUT_PRIMITIVE_TOPOLOGY: {
+        char const* topology = nullptr;
+        switch (instruction.controls & 0x3fu) {
+          case 1: topology = "points"; break;
+          case 3: topology = "line_strip"; break;
+          case 5: topology = "triangle_strip"; break;
+          default: break;
+        }
+        if (topology == nullptr) {
+          Fail("a geometry shader output topology GLSL ES has no layout for");
+          return false;
+        }
+        _declarations += "layout(" + std::string(topology) + ", max_vertices = " +
+                         std::to_string(_program.maxOutputVertexCount == 0
+                                            ? 1u
+                                            : _program.maxOutputVertexCount) + ") out;\n";
+        break;
+      }
+      case OP_DCL_GS_INSTANCE_COUNT:
+        if (!instruction.extra.empty() && instruction.extra[0] > 1) {
+          _declarations += "layout(invocations = " + std::to_string(instruction.extra[0]) + ") in;\n";
+        }
+        break;
+      case OP_DCL_STREAM:
+        // Multiple stream output is a D3D-only concept; a shader using more
+        // than the default stream cannot be expressed here.
+        if (!instruction.operands.empty() && !instruction.operands[0].indices.empty() &&
+            instruction.operands[0].indices.back().immediate != 0) {
+          Fail("a geometry shader writes to a stream other than the first, which GLSL ES "
+               "has no form for");
+          return false;
+        }
+        break;
+      default:
+        break;
+    }
+    if (_failed) return false;
+  }
+  return true;
 }
 
 }  // namespace
@@ -1281,17 +1765,46 @@ std::string GlslEmitter::RegisterName(Operand const& operand) {
         Fail("an input register with no index");
         return {};
       }
-      uint32_t const registerIndex = static_cast<uint32_t>(operand.indices.back().immediate);
+      // A geometry shader addresses its inputs as v[vertex][register]; every
+      // other stage has one index.
+      bool const perVertex = operand.indices.size() >= 2;
+      OperandIndex const& registerPart = operand.indices.back();
+      uint32_t const registerIndex = static_cast<uint32_t>(registerPart.immediate);
       auto const* element = FindSignature(_program.inputSignature, registerIndex);
       if (element == nullptr) {
-        Fail("input register v" + std::to_string(registerIndex) + " is not in the input signature");
+        Fail("input register v" + std::to_string(registerIndex) +
+             " is not in the input signature");
         return {};
       }
-      if (_program.stage == Stage::Pixel && element->systemValueType == 1) return "gl_FragCoord";
-      if (element->systemValueType == 9) return "vFrontFace";
-      if (element->semanticName == "SV_VertexID") return "vVertexID";
-      if (element->semanticName == "SV_InstanceID") return "vInstanceID";
-      return VaryingName(*element, _program.stage == Stage::Vertex);
+      if (_program.stage == Stage::Pixel && element->systemValueType == kSvPosition) {
+        return "gl_FragCoord";
+      }
+      switch (element->systemValueType) {
+        case kSvIsFrontFace: _usedFrontFace = true; return "vFrontFace";
+        case kSvVertexID: _usedVertexID = true; return "vVertexID";
+        case kSvInstanceID: _usedInstanceID = true; return "vInstanceID";
+        case kSvPrimitiveID: _usedPrimitiveID = true; return "vPrimitiveID";
+        case kSvSampleIndex: _usedSampleIndex = true; return "vSampleIndex";
+        default: break;
+      }
+      std::string name = VaryingName(*element, _program.stage == Stage::Vertex);
+      if (perVertex) {
+        if (_program.stage == Stage::Geometry &&
+            element->systemValueType == kSvPosition) {
+          name = "gl_in";
+        }
+        std::string vertex;
+        OperandIndex const& vertexPart = operand.indices[0];
+        if (vertexPart.hasRelative && vertexPart.relative) {
+          vertex = ScalarInt(*vertexPart.relative);
+          if (vertexPart.immediate != 0) vertex += " + " + std::to_string(vertexPart.immediate);
+        } else {
+          vertex = std::to_string(vertexPart.immediate);
+        }
+        if (name == "gl_in") return "gl_in[" + vertex + "].gl_Position";
+        return name + "[" + vertex + "]";
+      }
+      return name;
     }
     case kOperandOutput: {
       if (operand.indices.empty()) {
@@ -1305,16 +1818,52 @@ std::string GlslEmitter::RegisterName(Operand const& operand) {
              " is not in the output signature");
         return {};
       }
-      if (_program.stage == Stage::Vertex) {
-        if (element->systemValueType == 1) return "gl_Position";
-        return VaryingName(*element, false);
+      switch (element->systemValueType) {
+        case kSvPosition: return "gl_Position";
+        case kSvDepth:
+        case kSvDepthGreaterEqual:
+        case kSvDepthLessEqual: return "gl_FragDepth";
+        case kSvRenderTargetArrayIndex: return "gl_Layer";
+        case kSvCoverage: return "gl_SampleMask[0]";
+        default: break;
       }
-      return element->semanticName + std::to_string(element->semanticIndex);
+      if (_program.stage == Stage::Pixel) {
+        return element->semanticName + std::to_string(element->semanticIndex);
+      }
+      return VaryingName(*element, false);
     }
     case kOperandOutputDepth:
     case kOperandOutputDepthGreaterEqual:
     case kOperandOutputDepthLessEqual:
       return "gl_FragDepth";
+    case kOperandOutputCoverageMask:
+      return "gl_SampleMask[0]";
+    case kOperandInputCoverageMask:
+      return "gl_SampleMaskIn[0]";
+    case kOperandInputPrimitiveID:
+      _usedPrimitiveID = true;
+      return "vPrimitiveID";
+    case kOperandInputGsInstanceID:
+      _usedGsInstanceID = true;
+      return "vGsInstanceID";
+    case kOperandThreadGroupSharedMemory:
+    case kOperandUnorderedAccessView:
+      // These are addressed by the buffer instructions, which resolve them
+      // through StorageFor rather than as a register.
+      Fail("a buffer register used where a value register was expected");
+      return {};
+    case kOperandInputThreadID:
+      _usedThreadID = true;
+      return "vThreadID";
+    case kOperandInputThreadGroupID:
+      _usedThreadGroupID = true;
+      return "vThreadGroupID";
+    case kOperandInputThreadIDInGroup:
+      _usedThreadIDInGroup = true;
+      return "vThreadIDInGroup";
+    case kOperandInputThreadIDInGroupFlattened:
+      _usedThreadIDFlattened = true;
+      return "vThreadIDInGroupFlattened";
     case kOperandNull:
       return "null";
     default:
@@ -1478,18 +2027,20 @@ std::string GlslEmitter::SrcBase(Operand const& operand, uint8_t mask) {
 
   std::string const name = RegisterName(operand);
   if (_failed || name.empty()) return {};
-  if (name == "vVertexID" || name == "vInstanceID") {
-    return "intBitsToFloat(" + name + ")";
-  }
   if (operand.numComponents == 0) return name;
+  // Scalar built-ins take no swizzle; a mask on one is D3D asking for the same
+  // value in every component.
+  if (name == "gl_FragDepth" || name == "gl_Layer" || name == "gl_SampleMask[0]" ||
+      name == "gl_SampleMaskIn[0]") {
+    if (count == 1) return name;
+    return "vec" + std::to_string(count) + "(intBitsToFloat(" + name + "))";
+  }
 
   std::string swizzle = ".";
   for (int i = 0; i < 4; i++) {
     if (!(mask & (1u << i))) continue;
     swizzle += kComponentNames[operand.numComponents == 1 ? 0 : (operand.swizzle[i] & 0x3u)];
   }
-  // gl_FragDepth is a bare float; a swizzle on it would not compile.
-  if (name == "gl_FragDepth") return name;
   return name + swizzle;
 }
 
@@ -1562,16 +2113,15 @@ std::string GlslEmitter::SrcUint(Operand const& operand, uint8_t mask) {
 }
 
 std::string GlslEmitter::ScalarFloat(Operand const& operand) {
-  uint8_t mask = 0x1;
-  if (operand.numComponents == 4) {
-    // A scalar read of a four-component operand takes its first swizzle slot.
-    mask = 0x1;
-  }
-  return SrcFloat(operand, mask);
+  return SrcFloat(operand, 0x1);
 }
 
 std::string GlslEmitter::ScalarInt(Operand const& operand) {
   return SrcInt(operand, 0x1);
+}
+
+std::string GlslEmitter::ScalarUint(Operand const& operand) {
+  return SrcUint(operand, 0x1);
 }
 
 std::string GlslEmitter::DestName(Operand const& operand, uint8_t& mask) {
@@ -1597,6 +2147,12 @@ void GlslEmitter::WriteDest(Instruction const& instruction, Operand const& dest,
     Line(name + " = " + value + ";");
     return;
   }
+  // gl_Layer and the coverage mask are ints in GLSL and typeless registers in
+  // DXBC, so the bits have to be reinterpreted rather than converted.
+  if (name == "gl_Layer" || name == "gl_SampleMask[0]") {
+    Line(name + " = floatBitsToInt(" + value + ");");
+    return;
+  }
   std::string swizzle = ".";
   for (int i = 0; i < 4; i++) {
     if (mask & (1u << i)) swizzle += kComponentNames[i];
@@ -1608,12 +2164,86 @@ void GlslEmitter::WriteDest(Instruction const& instruction, Operand const& dest,
 
 namespace {
 
+MappedTexture const* GlslEmitter::TextureFor(Operand const& resource) {
+  if (resource.indices.empty()) {
+    Fail("a texture fetch with no resource register");
+    return nullptr;
+  }
+  uint32_t const index = static_cast<uint32_t>(resource.indices.back().immediate);
+  if (index >= _textures.size() || _textures[index].name.empty()) {
+    Fail("the shader samples t" + std::to_string(index) +
+         ", which its reflection data does not name");
+    return nullptr;
+  }
+  return &_textures[index];
+}
+
+MappedStorage const* GlslEmitter::StorageFor(Operand const& operand) {
+  if (operand.indices.empty()) {
+    Fail("a buffer access with no register");
+    return nullptr;
+  }
+  uint32_t const index = static_cast<uint32_t>(operand.indices.back().immediate);
+  if (operand.type == kOperandThreadGroupSharedMemory) {
+    // Shared memory is declared by the instruction stream rather than by the
+    // reflection data, so its entry is built here on first use.
+    for (auto const& existing : _sharedStorage) {
+      if (existing.bindPoint == index) return &existing;
+    }
+    for (auto const& block : _sharedBlocks) {
+      if (block.index != index) continue;
+      MappedStorage storage;
+      storage.name = "g" + std::to_string(index);
+      storage.bindPoint = index;
+      storage.stride = block.stride;
+      storage.writable = true;
+      _sharedStorage.push_back(std::move(storage));
+      return &_sharedStorage.back();
+    }
+    Fail("the shader uses shared memory g" + std::to_string(index) + ", which it never declared");
+    return nullptr;
+  }
+  std::vector<MappedStorage> const& table =
+      operand.type == kOperandUnorderedAccessView ? _storage : _rawResources;
+  if (index >= table.size() || table[index].name.empty()) {
+    Fail("the shader accesses " +
+         std::string(operand.type == kOperandUnorderedAccessView ? "u" : "t") +
+         std::to_string(index) + ", which its reflection data does not name");
+    return nullptr;
+  }
+  return &table[index];
+}
+
+// The compile-time texel offset on a fetch, as GLSL's separate offset argument.
+// Dropping this changes which texel is read, so a fetch that carries one is
+// translated to the *Offset form rather than the plain one.
+std::string GlslEmitter::SampleOffsetArgument(Instruction const& instruction, int components) {
+  if (!instruction.hasSampleOffsets) return {};
+  std::string text = ", ";
+  if (components <= 1) return text + std::to_string(instruction.sampleOffsetU);
+  text += "ivec" + std::to_string(components) + "(" + std::to_string(instruction.sampleOffsetU);
+  if (components >= 2) text += ", " + std::to_string(instruction.sampleOffsetV);
+  if (components >= 3) text += ", " + std::to_string(instruction.sampleOffsetW);
+  return text + ")";
+}
+
+// The resource operand's swizzle says which channel of the fetched texel feeds
+// each written component, so t0.yyyy in the bytecode has to become .yyyy on the
+// GLSL fetch.
+std::string GlslEmitter::ResourceSwizzle(Operand const& resource, uint8_t mask) {
+  std::string swizzle = ".";
+  for (int i = 0; i < 4; i++) {
+    if (mask & (1u << i)) swizzle += kComponentNames[resource.swizzle[i] & 0x3u];
+  }
+  return swizzle;
+}
+
 bool GlslEmitter::EmitInstruction(Instruction const& instruction) {
   auto const& operands = instruction.operands;
   uint32_t const opcode = instruction.opcode;
 
   // Declarations carry no code; everything they say has already been read off
-  // the reflection chunks or the program header.
+  // the reflection chunks, the program header, or BuildStageDeclarations.
   switch (opcode) {
     case OP_DCL_RESOURCE:
     case OP_DCL_CONSTANT_BUFFER:
@@ -1631,6 +2261,19 @@ bool GlslEmitter::EmitInstruction(Instruction const& instruction) {
     case OP_DCL_TEMPS:
     case OP_DCL_INDEXABLE_TEMP:
     case OP_DCL_GLOBAL_FLAGS:
+    case OP_DCL_GS_INPUT_PRIMITIVE:
+    case OP_DCL_GS_OUTPUT_PRIMITIVE_TOPOLOGY:
+    case OP_DCL_GS_INSTANCE_COUNT:
+    case OP_DCL_MAX_OUTPUT_VERTEX_COUNT:
+    case OP_DCL_STREAM:
+    case OP_DCL_THREAD_GROUP:
+    case OP_DCL_UAV_TYPED:
+    case OP_DCL_UAV_RAW:
+    case OP_DCL_UAV_STRUCTURED:
+    case OP_DCL_TGSM_RAW:
+    case OP_DCL_TGSM_STRUCTURED:
+    case OP_DCL_RESOURCE_RAW:
+    case OP_DCL_RESOURCE_STRUCTURED:
     case OP_NOP:
       return true;
     default:
@@ -1640,6 +2283,10 @@ bool GlslEmitter::EmitInstruction(Instruction const& instruction) {
   auto destMask = [&]() -> uint8_t {
     if (operands.empty()) return 0;
     return operands[0].numComponents == 4 ? operands[0].mask : 0x1;
+  };
+  auto maskOf = [&](size_t index) -> uint8_t {
+    if (operands.size() <= index) return 0x1;
+    return operands[index].numComponents == 4 ? operands[index].mask : 0x1;
   };
 
   // The per-component ALU shape: every source is read with the destination's
@@ -1723,57 +2370,68 @@ bool GlslEmitter::EmitInstruction(Instruction const& instruction) {
     if (count > 1) expression = "vec" + std::to_string(count) + "(" + expression + ")";
     WriteDest(instruction, operands[0], expression);
   };
+  auto broadcast = [&](std::string const& scalar, int count, char const* prefix) {
+    if (count == 1) return scalar;
+    return VecType(count, prefix) + "(" + scalar + ")";
+  };
 
-  auto sampleCoordinateMask = [&](uint32_t resourceRegister) -> uint8_t {
-    if (resourceRegister >= _samplerDimensions.size()) return 0;
-    switch (_samplerDimensions[resourceRegister]) {
-      case 4: return 0x3;  // Texture2D
-      case 5: return 0x7;  // Texture2DArray
-      case 8: return 0x7;  // Texture3D
-      case 9: return 0x7;  // TextureCube
-      default: return 0;
-    }
-  };
-  // The resource operand's swizzle says which channel of the fetched texel
-  // feeds each written component, so t0.yyyy in the bytecode has to become
-  // .yyyy on the GLSL fetch.
-  auto resourceSwizzle = [&](Operand const& resource, uint8_t mask) {
-    std::string swizzle = ".";
-    for (int i = 0; i < 4; i++) {
-      if (mask & (1u << i)) swizzle += kComponentNames[resource.swizzle[i] & 0x3u];
-    }
-    return swizzle;
-  };
-  auto samplerFor = [&](Operand const& resource) -> std::string {
-    if (resource.indices.empty()) {
-      Fail("a texture fetch with no resource register");
-      return {};
-    }
-    uint32_t const index = static_cast<uint32_t>(resource.indices.back().immediate);
-    if (index >= _samplerNames.size() || _samplerNames[index].empty()) {
-      Fail("the shader samples t" + std::to_string(index) +
-           ", which its reflection data does not name");
-      return {};
-    }
-    return _samplerNames[index];
-  };
-  auto emitSample = [&](char const* function, int extraOperand) {
+  // ---- texture fetches ----------------------------------------------------
+  auto emitSample = [&](char const* function, char const* offsetFunction, int extraOperand,
+                        bool comparison) {
     if (operands.size() < 4) {
       Fail("a texture fetch with too few operands");
       return;
     }
     Operand const& resource = operands[2];
-    std::string const sampler = samplerFor(resource);
-    if (_failed) return;
-    uint32_t const resourceRegister = static_cast<uint32_t>(resource.indices.back().immediate);
-    uint8_t const coordinateMask = sampleCoordinateMask(resourceRegister);
-    if (coordinateMask == 0) {
-      Fail("the shader samples t" + std::to_string(resourceRegister) +
-           ", whose dimension has no GLSL ES sampler");
+    MappedTexture const* texture = TextureFor(resource);
+    if (texture == nullptr) return;
+    if (texture->comparison != comparison) {
+      Fail("texture '" + texture->name +
+           "' is fetched both with and without depth comparison, which needs two sampler types");
       return;
     }
-    std::string call = std::string(function) + "(" + sampler + ", " +
-                       SrcFloat(operands[1], coordinateMask);
+    // A buffer texture and a multisample texture have no sampler state and no
+    // mip chain; GLSL ES offers only texelFetch for them, and D3D only reaches
+    // them through ld. A filtered fetch from one is bytecode this cannot mean.
+    if (texture->dimension == 1 || texture->multisample) {
+      Fail("'" + OpcodeName(opcode) + "' filters texture '" + texture->name +
+           "', which GLSL ES can only fetch by texel");
+      return;
+    }
+    int coordinateComponents = texture->coordinateComponents;
+    if (comparison) {
+      // A shadow sampler folds the comparison value into the coordinate, so
+      // sampler2DShadow takes a vec3 where sampler2D takes a vec2.
+      coordinateComponents += 1;
+      if (coordinateComponents > 4) {
+        Fail("texture '" + texture->name +
+             "' is a shadow map of a shape GLSL ES has no comparison sampler for");
+        return;
+      }
+    }
+    std::string call;
+    if (instruction.hasSampleOffsets) {
+      if (offsetFunction == nullptr) {
+        Fail("a " + OpcodeName(opcode) +
+             " carries a texel offset, and GLSL ES has no offset form of it");
+        return;
+      }
+      call = offsetFunction;
+    } else {
+      call = function;
+    }
+    call += "(" + texture->name + ", ";
+    if (comparison) {
+      // The comparison operand is the last one; it becomes the extra coordinate
+      // component.
+      uint8_t const coordinateMask =
+          static_cast<uint8_t>((1u << (coordinateComponents - 1)) - 1u);
+      call += "vec" + std::to_string(coordinateComponents) + "(" +
+              SrcFloat(operands[1], coordinateMask) + ", " +
+              ScalarFloat(operands[operands.size() - 1]) + ")";
+    } else {
+      call += SrcFloat(operands[1], static_cast<uint8_t>((1u << coordinateComponents) - 1u));
+    }
     if (extraOperand >= 0) {
       if (operands.size() <= static_cast<size_t>(extraOperand)) {
         Fail("a texture fetch is missing its lod/bias operand");
@@ -1781,12 +2439,226 @@ bool GlslEmitter::EmitInstruction(Instruction const& instruction) {
       }
       call += ", " + ScalarFloat(operands[static_cast<size_t>(extraOperand)]);
     }
+    // The offset is a separate argument in GLSL and rides on the instruction
+    // in DXBC. Its component count follows the texture's addressable
+    // dimensions, not the coordinate's -- an array layer takes no offset.
+    int offsetComponents = texture->coordinateComponents;
+    if (texture->dimension == 5) offsetComponents = 2;   // Texture2DArray
+    if (texture->dimension == 7) offsetComponents = 2;   // Texture2DMSArray
+    if (texture->dimension == 10) offsetComponents = 3;  // TextureCubeArray
+    call += SampleOffsetArgument(instruction, offsetComponents);
     call += ")";
+
     uint8_t const mask = destMask();
-    WriteDest(instruction, operands[0], call + resourceSwizzle(resource, mask));
+    if (comparison) {
+      // A shadow fetch returns one float; D3D writes it to every selected
+      // component.
+      WriteDest(instruction, operands[0], broadcast(call, PopCount4(mask), ""));
+      return;
+    }
+    WriteDest(instruction, operands[0], call + ResourceSwizzle(resource, mask));
+  };
+
+  auto emitGather = [&](bool comparison) {
+    if (operands.size() < 4) {
+      Fail("a gather4 with too few operands");
+      return;
+    }
+    if (!Require(310, "textureGather")) return;
+    Operand const& resource = operands[2];
+    MappedTexture const* texture = TextureFor(resource);
+    if (texture == nullptr) return;
+    if (texture->comparison != comparison) {
+      Fail("texture '" + texture->name +
+           "' is gathered both with and without depth comparison, which needs two sampler types");
+      return;
+    }
+    if (texture->dimension == 1 || texture->multisample) {
+      Fail("gather4 reads texture '" + texture->name +
+           "', which GLSL ES can only fetch by texel");
+      return;
+    }
+    if (instruction.hasSampleOffsets && !Require(320, "textureGatherOffset")) return;
+
+    std::string call = instruction.hasSampleOffsets ? "textureGatherOffset(" : "textureGather(";
+    call += texture->name + ", " +
+            SrcFloat(operands[1], static_cast<uint8_t>((1u << texture->coordinateComponents) - 1u));
+    if (instruction.hasSampleOffsets) {
+      int offsetComponents = texture->coordinateComponents;
+      if (texture->dimension == 5) offsetComponents = 2;   // Texture2DArray
+      if (texture->dimension == 9) {
+        Fail("a cube map gather cannot carry a texel offset");
+        return;
+      }
+      call += SampleOffsetArgument(instruction, offsetComponents);
+    }
+    if (comparison) {
+      call += ", " + ScalarFloat(operands[operands.size() - 1]);
+    } else {
+      // Without a comparison, the channel gathered is the resource operand's
+      // first swizzle slot: gather4 reads one channel of four neighbouring
+      // texels, and the swizzle is how D3D says which.
+      call += ", " + std::to_string(resource.swizzle[0] & 0x3u);
+    }
+    call += ")";
+    // textureGather returns the four texels in the order (0,1) (1,1) (1,0)
+    // (0,0), which is the same order D3D's gather4 writes, so the destination
+    // mask maps straight across.
+    uint8_t const mask = destMask();
+    int const count = PopCount4(mask);
+    std::string swizzle = ".";
+    for (int i = 0; i < 4; i++) {
+      if (mask & (1u << i)) swizzle += kComponentNames[i];
+    }
+    WriteDest(instruction, operands[0], count == 4 ? call : call + swizzle);
+  };
+
+  // ---- buffers ------------------------------------------------------------
+  //
+  // Raw and structured buffers are addressed in bytes or in (element, offset)
+  // pairs and become an array of uints, exactly as the bytecode treats them:
+  // it reads whatever is there and casts.
+  auto bufferElementExpression = [&](Operand const& resourceOperand, Operand const& first,
+                                     Operand const* second, uint32_t stride,
+                                     int component) -> std::string {
+    MappedStorage const* storage = StorageFor(resourceOperand);
+    if (storage == nullptr) return {};
+    std::string index;
+    if (second == nullptr) {
+      // Raw: a single byte address.
+      index = "((" + ScalarUint(first) + " >> 2u) + " + std::to_string(component) + "u)";
+    } else {
+      std::string const element = ScalarUint(first);
+      std::string const byteOffset = ScalarUint(*second);
+      index = "((" + element + " * " + std::to_string(stride == 0 ? 4u : stride) + "u + " +
+              byteOffset + ") >> 2u) + " + std::to_string(component) + "u";
+      index = "(" + index + ")";
+    }
+    return storage->name + "[" + index + "]";
+  };
+
+  auto emitBufferLoad = [&](bool structured) {
+    size_t const resourceIndex = structured ? 3u : 2u;
+    if (operands.size() <= resourceIndex) {
+      Fail("a buffer load with too few operands");
+      return;
+    }
+    if (!Require(310, "a storage buffer")) return;
+    Operand const& resourceOperand = operands[resourceIndex];
+    MappedStorage const* storage = StorageFor(resourceOperand);
+    if (storage == nullptr) return;
+    uint8_t const mask = destMask();
+    int const count = PopCount4(mask);
+    std::vector<std::string> parts;
+    for (int i = 0; i < 4; i++) {
+      if (!(mask & (1u << i))) continue;
+      int const channel = resourceOperand.swizzle[i] & 0x3;
+      std::string const element =
+          structured ? bufferElementExpression(resourceOperand, operands[1], &operands[2],
+                                               storage->stride, channel)
+                     : bufferElementExpression(resourceOperand, operands[1], nullptr, 0, channel);
+      if (_failed) return;
+      parts.push_back(element);
+    }
+    std::string expression = count == 1 ? parts[0] : "uvec" + std::to_string(count) + "(";
+    if (count > 1) {
+      for (size_t i = 0; i < parts.size(); i++) {
+        if (i != 0) expression += ", ";
+        expression += parts[i];
+      }
+      expression += ")";
+    }
+    WriteDest(instruction, operands[0], "uintBitsToFloat(" + expression + ")");
+  };
+
+  auto emitBufferStore = [&](bool structured) {
+    size_t const valueIndex = structured ? 3u : 2u;
+    if (operands.size() <= valueIndex) {
+      Fail("a buffer store with too few operands");
+      return;
+    }
+    if (!Require(310, "a storage buffer")) return;
+    Operand const& destination = operands[0];
+    MappedStorage const* storage = StorageFor(destination);
+    if (storage == nullptr) return;
+    if (!storage->writable) {
+      Fail("the shader writes to '" + storage->name + "', which is bound read-only");
+      return;
+    }
+    uint8_t const mask = destination.numComponents == 4 ? destination.mask : 0x1;
+    Operand const& value = operands[valueIndex];
+    for (int i = 0; i < 4; i++) {
+      if (!(mask & (1u << i))) continue;
+      std::string const element =
+          structured ? bufferElementExpression(destination, operands[1], &operands[2],
+                                               storage->stride, i)
+                     : bufferElementExpression(destination, operands[1], nullptr, 0, i);
+      if (_failed) return;
+      Line(element + " = " + SrcUint(value, static_cast<uint8_t>(1u << i)) + ";");
+    }
+  };
+
+  // ---- atomics ------------------------------------------------------------
+  //
+  // D3D's atomic_* discard the previous value and imm_atomic_* return it;
+  // GLSL's atomic functions always return it, so the two differ only in whether
+  // the result is written anywhere. Both address a buffer the same way an
+  // ordinary load does.
+  auto emitAtomic = [&](char const* function, bool returnsOld) {
+    size_t const destinationIndex = returnsOld ? 1u : 0u;
+    size_t const addressIndex = destinationIndex + 1u;
+    if (operands.size() <= addressIndex + 1u) {
+      Fail(OpcodeName(opcode) + " with too few operands");
+      return;
+    }
+    if (!Require(310, "an atomic operation")) return;
+    Operand const& destination = operands[destinationIndex];
+    if (destination.type == kOperandUnorderedAccessView) {
+      MappedStorage const* storage = StorageFor(destination);
+      if (storage != nullptr && storage->typedImage) {
+        // imageAtomic* needs an r32ui/r32i image, and a typed UAV declared from
+        // reflection data is an rgba32 one. Guessing the format would compile
+        // and corrupt whatever it wrote.
+        Fail("an atomic operation on a typed image is not translated");
+        return;
+      }
+    }
+    MappedStorage const* storage = StorageFor(destination);
+    if (storage == nullptr) return;
+    if (!storage->writable) {
+      Fail("the shader performs an atomic operation on '" + storage->name +
+           "', which is bound read-only");
+      return;
+    }
+    // The address is a byte offset for a raw buffer and an element index plus
+    // byte offset for a structured one; both reduce to a dword index.
+    Operand const& address = operands[addressIndex];
+    std::string index;
+    if (address.numComponents == 4 && PopCount4(address.mask == 0 ? 0xf : address.mask) > 1 &&
+        storage->stride > 4) {
+      index = "(((" + SrcUint(address, 0x1) + " * " + std::to_string(storage->stride) + "u) + " +
+              SrcUint(address, 0x2) + ") >> 2u)";
+    } else {
+      index = "(" + SrcUint(address, 0x1) + " >> 2u)";
+    }
+    std::string const slot = storage->name + "[" + index + "]";
+    std::string call;
+    if (opcode == OP_IMM_ATOMIC_CMP_EXCH || opcode == OP_ATOMIC_CMP_STORE) {
+      call = "atomicCompSwap(" + slot + ", " + SrcUint(operands[addressIndex + 1], 0x1) + ", " +
+             SrcUint(operands[addressIndex + 2], 0x1) + ")";
+    } else {
+      call = std::string(function) + "(" + slot + ", " +
+             SrcUint(operands[addressIndex + 1], 0x1) + ")";
+    }
+    if (!returnsOld) {
+      Line(call + ";");
+      return;
+    }
+    WriteDest(instruction, operands[0], "uintBitsToFloat(" + call + ")");
   };
 
   switch (opcode) {
+    // ---- moves and float arithmetic ----------------------------------------
     case OP_MOV:
       WriteDest(instruction, operands[0], SrcFloat(operands[1], destMask()));
       break;
@@ -1828,6 +2700,17 @@ bool GlslEmitter::EmitInstruction(Instruction const& instruction) {
     case OP_DP2: dotProduct(2); break;
     case OP_DP3: dotProduct(3); break;
     case OP_DP4: dotProduct(4); break;
+    case OP_SINCOS: {
+      if (operands[0].type != kOperandNull) {
+        WriteDest(instruction, operands[0], "sin(" + SrcFloat(operands[2], maskOf(0)) + ")");
+      }
+      if (operands[1].type != kOperandNull) {
+        WriteDest(instruction, operands[1], "cos(" + SrcFloat(operands[2], maskOf(1)) + ")");
+      }
+      break;
+    }
+
+    // ---- comparisons -------------------------------------------------------
     case OP_EQ: compare("equal", "==", 0); break;
     case OP_NE: compare("notEqual", "!=", 0); break;
     case OP_LT: compare("lessThan", "<", 0); break;
@@ -1854,6 +2737,8 @@ bool GlslEmitter::EmitInstruction(Instruction const& instruction) {
       WriteDest(instruction, operands[0], expression);
       break;
     }
+
+    // ---- integer arithmetic ------------------------------------------------
     case OP_IADD: intBinary("+"); break;
     case OP_AND: intBinary("&"); break;
     case OP_OR: intBinary("|"); break;
@@ -1866,69 +2751,90 @@ bool GlslEmitter::EmitInstruction(Instruction const& instruction) {
     case OP_UMIN: uintBinaryFunction("min"); break;
     case OP_USHR: uintBinary(">>"); break;
     case OP_NOT: {
-      uint8_t const mask = destMask();
-      WriteDest(instruction, operands[0], "intBitsToFloat(~" + SrcInt(operands[1], mask) + ")");
+      WriteDest(instruction, operands[0],
+                "intBitsToFloat(~" + SrcInt(operands[1], destMask()) + ")");
       break;
     }
     case OP_INEG: {
-      uint8_t const mask = destMask();
-      WriteDest(instruction, operands[0], "intBitsToFloat(-" + SrcInt(operands[1], mask) + ")");
+      WriteDest(instruction, operands[0],
+                "intBitsToFloat(-" + SrcInt(operands[1], destMask()) + ")");
       break;
     }
     case OP_IMAD: {
       uint8_t const mask = destMask();
-      std::string const a = SrcInt(operands[1], mask);
-      std::string const b = SrcInt(operands[2], mask);
-      std::string const c = SrcInt(operands[3], mask);
-      WriteDest(instruction, operands[0], "intBitsToFloat(" + a + " * " + b + " + " + c + ")");
+      WriteDest(instruction, operands[0],
+                "intBitsToFloat(" + SrcInt(operands[1], mask) + " * " + SrcInt(operands[2], mask) +
+                    " + " + SrcInt(operands[3], mask) + ")");
       break;
     }
     case OP_UMAD: {
       uint8_t const mask = destMask();
-      std::string const a = SrcUint(operands[1], mask);
-      std::string const b = SrcUint(operands[2], mask);
-      std::string const c = SrcUint(operands[3], mask);
-      WriteDest(instruction, operands[0], "uintBitsToFloat(" + a + " * " + b + " + " + c + ")");
+      WriteDest(instruction, operands[0],
+                "uintBitsToFloat(" + SrcUint(operands[1], mask) + " * " +
+                    SrcUint(operands[2], mask) + " + " + SrcUint(operands[3], mask) + ")");
       break;
     }
     case OP_ITOF: {
       uint8_t const mask = destMask();
-      int const count = PopCount4(mask);
       WriteDest(instruction, operands[0],
-                VecType(count, "") + "(" + SrcInt(operands[1], mask) + ")");
+                VecType(PopCount4(mask), "") + "(" + SrcInt(operands[1], mask) + ")");
       break;
     }
     case OP_UTOF: {
       uint8_t const mask = destMask();
-      int const count = PopCount4(mask);
       WriteDest(instruction, operands[0],
-                VecType(count, "") + "(" + SrcUint(operands[1], mask) + ")");
+                VecType(PopCount4(mask), "") + "(" + SrcUint(operands[1], mask) + ")");
       break;
     }
     case OP_FTOI: {
       uint8_t const mask = destMask();
-      int const count = PopCount4(mask);
       WriteDest(instruction, operands[0],
-                "intBitsToFloat(" + VecType(count, "i") + "(" + SrcFloat(operands[1], mask) + "))");
+                "intBitsToFloat(" + VecType(PopCount4(mask), "i") + "(" +
+                    SrcFloat(operands[1], mask) + "))");
       break;
     }
     case OP_FTOU: {
       uint8_t const mask = destMask();
-      int const count = PopCount4(mask);
       WriteDest(instruction, operands[0],
-                "uintBitsToFloat(" + VecType(count, "u") + "(" + SrcFloat(operands[1], mask) + "))");
+                "uintBitsToFloat(" + VecType(PopCount4(mask), "u") + "(" +
+                    SrcFloat(operands[1], mask) + "))");
       break;
     }
     case OP_IMUL:
     case OP_UMUL: {
-      // The high half of a 32x32 multiply has no GLSL ES 3.00 form, and a
-      // shader that asks for it is doing integer maths this model cannot carry.
-      if (operands[0].type != kOperandNull) {
-        Fail(OpcodeName(opcode) + " writes the high half of the product, which GLSL ES 3.00 "
-             "cannot compute");
-        return false;
+      bool const wantHigh = operands[0].type != kOperandNull;
+      bool const wantLow = operands[1].type != kOperandNull;
+      if (wantHigh) {
+        // The high half of a 32x32 multiply needs imulExtended/umulExtended,
+        // which are GLSL ES 3.10. Below that there is no correct expression
+        // for it at all.
+        if (!Require(310, OpcodeName(opcode) == "imul" ? "imul with a high half"
+                                                       : "umul with a high half")) {
+          return false;
+        }
+        uint8_t const highMask = maskOf(0);
+        uint8_t const lowMask = wantLow ? maskOf(1) : highMask;
+        int const count = PopCount4(highMask);
+        bool const isSigned = opcode == OP_IMUL;
+        std::string const type = VecType(count, isSigned ? "i" : "u");
+        std::string const a = isSigned ? SrcInt(operands[2], highMask) : SrcUint(operands[2], highMask);
+        std::string const b = isSigned ? SrcInt(operands[3], highMask) : SrcUint(operands[3], highMask);
+        std::string const highTemp = "mulHi" + std::to_string(instruction.tokenOffset);
+        std::string const lowTemp = "mulLo" + std::to_string(instruction.tokenOffset);
+        Line(type + " " + highTemp + ", " + lowTemp + ";");
+        Line(std::string(isSigned ? "imulExtended(" : "umulExtended(") + a + ", " + b + ", " +
+             highTemp + ", " + lowTemp + ");");
+        WriteDest(instruction, operands[0],
+                  std::string(isSigned ? "intBitsToFloat(" : "uintBitsToFloat(") + highTemp + ")");
+        if (wantLow) {
+          (void)lowMask;
+          WriteDest(instruction, operands[1],
+                    std::string(isSigned ? "intBitsToFloat(" : "uintBitsToFloat(") + lowTemp + ")");
+        }
+        break;
       }
-      uint8_t const mask = operands[1].numComponents == 4 ? operands[1].mask : 0x1;
+      if (!wantLow) break;
+      uint8_t const mask = maskOf(1);
       if (opcode == OP_IMUL) {
         WriteDest(instruction, operands[1],
                   "intBitsToFloat(" + SrcInt(operands[2], mask) + " * " +
@@ -1942,38 +2848,189 @@ bool GlslEmitter::EmitInstruction(Instruction const& instruction) {
     }
     case OP_UDIV: {
       if (operands[0].type != kOperandNull) {
-        uint8_t const mask = operands[0].numComponents == 4 ? operands[0].mask : 0x1;
+        uint8_t const mask = maskOf(0);
         WriteDest(instruction, operands[0],
                   "uintBitsToFloat(" + SrcUint(operands[2], mask) + " / " +
                       SrcUint(operands[3], mask) + ")");
       }
       if (operands[1].type != kOperandNull) {
-        uint8_t const mask = operands[1].numComponents == 4 ? operands[1].mask : 0x1;
+        uint8_t const mask = maskOf(1);
         WriteDest(instruction, operands[1],
                   "uintBitsToFloat(" + SrcUint(operands[2], mask) + " % " +
                       SrcUint(operands[3], mask) + ")");
       }
       break;
     }
-    case OP_SINCOS: {
-      if (operands[0].type != kOperandNull) {
-        uint8_t const mask = operands[0].numComponents == 4 ? operands[0].mask : 0x1;
-        WriteDest(instruction, operands[0], "sin(" + SrcFloat(operands[2], mask) + ")");
-      }
+    case OP_UADDC:
+    case OP_USUBB: {
+      if (!Require(310, opcode == OP_UADDC ? "uaddCarry" : "usubBorrow")) return false;
+      uint8_t const mask = maskOf(0);
+      int const count = PopCount4(mask);
+      std::string const carry = "carry" + std::to_string(instruction.tokenOffset);
+      Line(VecType(count, "u") + " " + carry + ";");
+      std::string const call = std::string(opcode == OP_UADDC ? "uaddCarry(" : "usubBorrow(") +
+                               SrcUint(operands[2], mask) + ", " + SrcUint(operands[3], mask) +
+                               ", " + carry + ")";
+      WriteDest(instruction, operands[0], "uintBitsToFloat(" + call + ")");
       if (operands[1].type != kOperandNull) {
-        uint8_t const mask = operands[1].numComponents == 4 ? operands[1].mask : 0x1;
-        WriteDest(instruction, operands[1], "cos(" + SrcFloat(operands[2], mask) + ")");
+        WriteDest(instruction, operands[1], "uintBitsToFloat(" + carry + ")");
       }
       break;
     }
-    case OP_SAMPLE: emitSample("texture", -1); break;
-    case OP_SAMPLE_L: emitSample("textureLod", 4); break;
+    case OP_SWAPC: {
+      // swapc writes src1 and src2 to its two destinations, swapped where the
+      // selector is non-zero. The two writes have to read the sources before
+      // either destination is touched, so both go through a temporary.
+      uint8_t const maskA = maskOf(0);
+      uint8_t const maskB = maskOf(1);
+      int const countA = PopCount4(maskA);
+      std::string const selector = SrcInt(operands[2], maskA);
+      std::string const first = "swapA" + std::to_string(instruction.tokenOffset);
+      std::string const second = "swapB" + std::to_string(instruction.tokenOffset);
+      Line(VecType(countA, "") + " " + first + " = " + SrcFloat(operands[3], maskA) + ";");
+      Line(VecType(PopCount4(maskB), "") + " " + second + " = " + SrcFloat(operands[4], maskB) +
+           ";");
+      auto select = [&](std::string const& whenSet, std::string const& whenClear, int count) {
+        if (count == 1) return "((" + selector + " != 0) ? " + whenSet + " : " + whenClear + ")";
+        return "mix(" + whenClear + ", " + whenSet + ", notEqual(" + selector + ", ivec" +
+               std::to_string(count) + "(0)))";
+      };
+      if (operands[0].type != kOperandNull) {
+        WriteDest(instruction, operands[0], select(second, first, countA));
+      }
+      if (operands[1].type != kOperandNull) {
+        WriteDest(instruction, operands[1], select(first, second, PopCount4(maskB)));
+      }
+      break;
+    }
+
+    // ---- bit manipulation ---------------------------------------------------
+    case OP_COUNTBITS: {
+      // bitCount returns a signed count; D3D's result is an unsigned one, so
+      // it is converted rather than bit-cast.
+      uint8_t const mask = destMask();
+      int const count = PopCount4(mask);
+      WriteDest(instruction, operands[0],
+                "uintBitsToFloat(" + VecType(count, "u") + "(bitCount(" +
+                    SrcUint(operands[1], mask) + ")))");
+      break;
+    }
+    case OP_BFREV: {
+      uint8_t const mask = destMask();
+      WriteDest(instruction, operands[0],
+                "uintBitsToFloat(bitfieldReverse(" + SrcUint(operands[1], mask) + "))");
+      break;
+    }
+    case OP_FIRSTBIT_HI:
+    case OP_FIRSTBIT_SHI:
+    case OP_FIRSTBIT_LO: {
+      uint8_t const mask = destMask();
+      int const count = PopCount4(mask);
+      std::string const value = opcode == OP_FIRSTBIT_SHI ? SrcInt(operands[1], mask)
+                                                          : SrcUint(operands[1], mask);
+      // findMSB counts from the low end and D3D's firstbit_hi counts from the
+      // high end, so the result is mirrored; findLSB matches firstbit_lo
+      // directly. Both return -1 for "no bits set", which is what D3D reports
+      // as 0xFFFFFFFF.
+      std::string expression;
+      if (opcode == OP_FIRSTBIT_LO) {
+        expression = "findLSB(" + value + ")";
+      } else {
+        expression = "(" + broadcast("31", count, "i") + " - findMSB(" + value + "))";
+      }
+      WriteDest(instruction, operands[0], "intBitsToFloat(" + expression + ")");
+      break;
+    }
+    case OP_UBFE:
+    case OP_IBFE: {
+      // D3D takes width and offset as separate operands and masks them to five
+      // bits; GLSL's bitfieldExtract takes them as ints in the same order.
+      uint8_t const mask = destMask();
+      int const count = PopCount4(mask);
+      bool const isSigned = opcode == OP_IBFE;
+      std::string const width = SrcInt(operands[1], mask);
+      std::string const offset = SrcInt(operands[2], mask);
+      std::string const value = isSigned ? SrcInt(operands[3], mask) : SrcUint(operands[3], mask);
+      std::string const call = "bitfieldExtract(" + value + ", (" + offset + ") & " +
+                               broadcast("31", count, "i") + ", (" + width + ") & " +
+                               broadcast("31", count, "i") + ")";
+      WriteDest(instruction, operands[0],
+                std::string(isSigned ? "intBitsToFloat(" : "uintBitsToFloat(") + call + ")");
+      break;
+    }
+    case OP_BFI: {
+      uint8_t const mask = destMask();
+      int const count = PopCount4(mask);
+      std::string const width = SrcInt(operands[1], mask);
+      std::string const offset = SrcInt(operands[2], mask);
+      std::string const insert = SrcUint(operands[3], mask);
+      std::string const base = SrcUint(operands[4], mask);
+      WriteDest(instruction, operands[0],
+                "uintBitsToFloat(bitfieldInsert(" + base + ", " + insert + ", (" + offset +
+                    ") & " + broadcast("31", count, "i") + ", (" + width + ") & " +
+                    broadcast("31", count, "i") + "))");
+      break;
+    }
+    case OP_F32TOF16: {
+      // D3D packs one float into the low sixteen bits of each component;
+      // packHalf2x16 packs two, so the second is zero and the result is the
+      // low half.
+      uint8_t const mask = destMask();
+      std::vector<std::string> parts;
+      for (int i = 0; i < 4; i++) {
+        if (!(mask & (1u << i))) continue;
+        parts.push_back("(packHalf2x16(vec2(" + SrcFloat(operands[1], static_cast<uint8_t>(1u << i)) +
+                        ", 0.0)) & 0xffffu)");
+      }
+      std::string expression = parts.size() == 1 ? parts[0]
+                                                 : "uvec" + std::to_string(parts.size()) + "(";
+      if (parts.size() > 1) {
+        for (size_t i = 0; i < parts.size(); i++) {
+          if (i != 0) expression += ", ";
+          expression += parts[i];
+        }
+        expression += ")";
+      }
+      WriteDest(instruction, operands[0], "uintBitsToFloat(" + expression + ")");
+      break;
+    }
+    case OP_F16TOF32: {
+      uint8_t const mask = destMask();
+      std::vector<std::string> parts;
+      for (int i = 0; i < 4; i++) {
+        if (!(mask & (1u << i))) continue;
+        parts.push_back("unpackHalf2x16(" + SrcUint(operands[1], static_cast<uint8_t>(1u << i)) +
+                        " & 0xffffu).x");
+      }
+      std::string expression = parts.size() == 1 ? parts[0]
+                                                 : "vec" + std::to_string(parts.size()) + "(";
+      if (parts.size() > 1) {
+        for (size_t i = 0; i < parts.size(); i++) {
+          if (i != 0) expression += ", ";
+          expression += parts[i];
+        }
+        expression += ")";
+      }
+      WriteDest(instruction, operands[0], expression);
+      break;
+    }
+
+    // ---- texture fetches ----------------------------------------------------
+    case OP_SAMPLE: emitSample("texture", "textureOffset", -1, false); break;
+    case OP_SAMPLE_L: emitSample("textureLod", "textureLodOffset", 4, false); break;
     case OP_SAMPLE_B:
       if (_program.stage != Stage::Pixel) {
         Fail("sample_b outside a fragment program has no GLSL ES form");
         return false;
       }
-      emitSample("texture", 4);
+      emitSample("texture", "textureOffset", 4, false);
+      break;
+    case OP_SAMPLE_C: emitSample("texture", "textureOffset", -1, true); break;
+    case OP_SAMPLE_C_LZ:
+      // There is no textureLod for a 2D shadow sampler in GLSL ES, and
+      // sample_c_lz always reads mip zero. In a fragment shader the ordinary
+      // fetch is the closest thing and is what Unity's own translator emits.
+      emitSample("texture", "textureOffset", -1, true);
       break;
     case OP_SAMPLE_D: {
       if (operands.size() < 6) {
@@ -1981,42 +3038,75 @@ bool GlslEmitter::EmitInstruction(Instruction const& instruction) {
         return false;
       }
       Operand const& resource = operands[2];
-      std::string const sampler = samplerFor(resource);
-      if (_failed) return false;
-      uint32_t const resourceRegister = static_cast<uint32_t>(resource.indices.back().immediate);
-      uint8_t const coordinateMask = sampleCoordinateMask(resourceRegister);
-      if (coordinateMask == 0) {
-        Fail("sample_d on a texture whose dimension has no GLSL ES sampler");
+      MappedTexture const* texture = TextureFor(resource);
+      if (texture == nullptr) return false;
+      if (texture->comparison) {
+        Fail("sample_d on a shadow map has no GLSL ES form");
         return false;
       }
-      uint8_t const mask = destMask();
-      std::string const call = "textureGrad(" + sampler + ", " +
-                               SrcFloat(operands[1], coordinateMask) + ", " +
-                               SrcFloat(operands[4], coordinateMask) + ", " +
-                               SrcFloat(operands[5], coordinateMask) + ")";
-      WriteDest(instruction, operands[0], call + resourceSwizzle(resource, mask));
+      uint8_t const coordinateMask =
+          static_cast<uint8_t>((1u << texture->coordinateComponents) - 1u);
+      // The gradients have one component per addressable dimension, which for
+      // an array texture is one fewer than the coordinate.
+      int gradientComponents = texture->coordinateComponents;
+      if (texture->dimension == 5 || texture->dimension == 7) gradientComponents = 2;
+      if (texture->dimension == 10) gradientComponents = 3;
+      uint8_t const gradientMask = static_cast<uint8_t>((1u << gradientComponents) - 1u);
+      std::string call = instruction.hasSampleOffsets ? "textureGradOffset(" : "textureGrad(";
+      call += texture->name + ", " + SrcFloat(operands[1], coordinateMask) + ", " +
+              SrcFloat(operands[4], gradientMask) + ", " + SrcFloat(operands[5], gradientMask);
+      call += SampleOffsetArgument(instruction, gradientComponents);
+      call += ")";
+      WriteDest(instruction, operands[0], call + ResourceSwizzle(resource, destMask()));
       break;
     }
-    case OP_LD: {
-      if (operands.size() < 3) {
-        Fail("ld with too few operands");
+    case OP_GATHER4: emitGather(false); break;
+    case OP_GATHER4_C: emitGather(true); break;
+    case OP_GATHER4_PO:
+    case OP_GATHER4_PO_C:
+      // A per-fetch programmable offset is not a constant expression, and GLSL
+      // ES only guarantees textureGatherOffset for constant ones.
+      Fail("gather4 with a programmable offset has no GLSL ES form");
+      return false;
+    case OP_LOD:
+      // textureQueryLod is desktop GLSL only.
+      Fail("lod (texture level-of-detail query) has no GLSL ES form");
+      return false;
+    case OP_LD:
+    case OP_LD_MS: {
+      size_t const resourceIndex = opcode == OP_LD_MS ? 2u : 2u;
+      if (operands.size() <= resourceIndex) {
+        Fail(OpcodeName(opcode) + " with too few operands");
         return false;
       }
-      Operand const& resource = operands[2];
-      std::string const sampler = samplerFor(resource);
-      if (_failed) return false;
-      uint32_t const resourceRegister = static_cast<uint32_t>(resource.indices.back().immediate);
-      uint8_t const coordinateMask = sampleCoordinateMask(resourceRegister);
-      if (coordinateMask == 0 || _samplerDimensions[resourceRegister] == 9) {
-        Fail("ld on a texture whose dimension GLSL ES cannot texelFetch");
+      Operand const& resource = operands[resourceIndex];
+      MappedTexture const* texture = TextureFor(resource);
+      if (texture == nullptr) return false;
+      if (texture->comparison || texture->dimension == 9 || texture->dimension == 10) {
+        Fail("a texel fetch from '" + texture->name +
+             "' is on a shape GLSL ES cannot texelFetch");
         return false;
       }
-      int const coordinateCount = PopCount4(coordinateMask);
-      uint8_t const mask = destMask();
-      std::string const call = "texelFetch(" + sampler + ", " + VecType(coordinateCount, "i") +
-                               "(" + SrcInt(operands[1], coordinateMask) + "), " +
-                               SrcInt(operands[1], 0x8) + ")";
-      WriteDest(instruction, operands[0], call + resourceSwizzle(resource, mask));
+      if (opcode == OP_LD_MS && !Require(310, "a multisample texel fetch")) return false;
+      int const coordinateComponents = texture->coordinateComponents;
+      uint8_t const coordinateMask = static_cast<uint8_t>((1u << coordinateComponents) - 1u);
+      std::string call = instruction.hasSampleOffsets ? "texelFetchOffset(" : "texelFetch(";
+      call += texture->name + ", " + VecType(coordinateComponents, "i") + "(" +
+              SrcInt(operands[1], coordinateMask) + ")";
+      if (opcode == OP_LD_MS) {
+        // The sample index is a separate operand; a multisample fetch has no
+        // mip level.
+        call += ", " + ScalarInt(operands[3]);
+      } else if (texture->dimension != 1) {
+        // A buffer texture has no mip chain, and texelFetch takes no level for
+        // one. Every other shape carries the level in the coordinate's w.
+        call += ", " + SrcInt(operands[1], 0x8);
+      }
+      int offsetComponents = coordinateComponents;
+      if (texture->dimension == 5 || texture->dimension == 7) offsetComponents = 2;
+      call += SampleOffsetArgument(instruction, offsetComponents);
+      call += ")";
+      WriteDest(instruction, operands[0], call + ResourceSwizzle(resource, destMask()));
       break;
     }
     case OP_RESINFO: {
@@ -2025,16 +3115,14 @@ bool GlslEmitter::EmitInstruction(Instruction const& instruction) {
         return false;
       }
       Operand const& resource = operands[2];
-      std::string const sampler = samplerFor(resource);
-      if (_failed) return false;
-      uint32_t const resourceRegister = static_cast<uint32_t>(resource.indices.back().immediate);
-      uint32_t const dimension = resourceRegister < _samplerDimensions.size()
-                                     ? _samplerDimensions[resourceRegister]
-                                     : 0u;
+      MappedTexture const* texture = TextureFor(resource);
+      if (texture == nullptr) return false;
       int sizeComponents = 0;
-      switch (dimension) {
-        case 4: case 9: sizeComponents = 2; break;
-        case 5: case 8: sizeComponents = 3; break;
+      switch (texture->dimension) {
+        case 4: case 9: case 6: sizeComponents = 2; break;
+        case 5: case 8: case 7: sizeComponents = 3; break;
+        case 10: sizeComponents = 3; break;
+        case 1: sizeComponents = 1; break;
         default: break;
       }
       if (sizeComponents == 0) {
@@ -2042,14 +3130,16 @@ bool GlslEmitter::EmitInstruction(Instruction const& instruction) {
         return false;
       }
       // resinfo returns width, height, depth/elements, mip count. GLSL ES has
-      // no query for the mip count, so a shader that reads .w gets 1.0 rather
+      // no query for the mip count, so a shader that reads .w gets 1 rather
       // than a wrong number.
-      std::string size = "textureSize(" + sampler + ", " + ScalarInt(operands[1]) + ")";
-      uint32_t const returnMode = (instruction.controls >> 0) & 0x3u;
+      std::string const size = texture->multisample || texture->dimension == 1
+                                   ? "textureSize(" + texture->name + ")"
+                                   : "textureSize(" + texture->name + ", " +
+                                         ScalarInt(operands[1]) + ")";
       std::string components[4];
       for (int i = 0; i < 4; i++) {
         if (i < sizeComponents) {
-          components[i] = size + "." + kComponentNames[i];
+          components[i] = sizeComponents == 1 ? size : size + "." + kComponentNames[i];
         } else {
           components[i] = i == 3 ? "1" : "0";
         }
@@ -2059,35 +3149,129 @@ bool GlslEmitter::EmitInstruction(Instruction const& instruction) {
       std::vector<std::string> parts;
       for (int i = 0; i < 4; i++) {
         if (!(mask & (1u << i))) continue;
-        int const source = resource.swizzle[i] & 0x3;
-        parts.push_back(components[source]);
+        parts.push_back(components[resource.swizzle[i] & 0x3]);
       }
+      uint32_t const returnMode = instruction.controls & 0x3u;
       std::string expression;
-      if (returnMode == 1) {  // resinfo_uint
-        expression = count == 1 ? "intBitsToFloat(int(" + parts[0] + "))" : std::string();
-        if (count > 1) {
-          expression = "intBitsToFloat(ivec" + std::to_string(count) + "(";
-          for (size_t i = 0; i < parts.size(); i++) {
-            if (i != 0) expression += ", ";
-            expression += parts[i];
-          }
-          expression += "))";
-        }
+      char const* prefix = returnMode == 1 ? "i" : "";
+      if (count == 1) {
+        expression = VecType(1, prefix) + "(" + parts[0] + ")";
       } else {
-        expression = count == 1 ? "float(" + parts[0] + ")" : std::string();
-        if (count > 1) {
-          expression = "vec" + std::to_string(count) + "(";
-          for (size_t i = 0; i < parts.size(); i++) {
-            if (i != 0) expression += ", ";
-            expression += parts[i];
-          }
-          expression += ")";
+        expression = VecType(count, prefix) + "(";
+        for (size_t i = 0; i < parts.size(); i++) {
+          if (i != 0) expression += ", ";
+          expression += parts[i];
         }
-        if (returnMode == 2) expression = "(1.0 / " + expression + ")";  // resinfo_rcpFloat
+        expression += ")";
+      }
+      if (returnMode == 1) {          // resinfo_uint
+        expression = "intBitsToFloat(" + expression + ")";
+      } else if (returnMode == 2) {   // resinfo_rcpFloat
+        expression = "(" + broadcast("1.0", count, "") + " / " + expression + ")";
       }
       WriteDest(instruction, operands[0], expression);
       break;
     }
+    case OP_BUFINFO: {
+      if (operands.size() < 2) {
+        Fail("bufinfo with too few operands");
+        return false;
+      }
+      if (!Require(310, "a storage buffer length query")) return false;
+      MappedStorage const* storage = StorageFor(operands[1]);
+      if (storage == nullptr) return false;
+      if (storage->typedImage) {
+        Fail("bufinfo on a typed image has no GLSL ES form");
+        return false;
+      }
+      // The array is declared as uints, so its length is in dwords; D3D wants
+      // elements for a structured buffer and bytes for a raw one.
+      std::string length = storage->name + ".length()";
+      if (storage->stride > 4) {
+        length = "(" + length + " / " + std::to_string(storage->stride / 4u) + ")";
+      } else if (storage->stride == 0) {
+        length = "(" + length + " * 4)";
+      }
+      WriteDest(instruction, operands[0],
+                "intBitsToFloat(" + broadcast("int(" + length + ")", PopCount4(destMask()), "i") +
+                    ")");
+      break;
+    }
+    case OP_SAMPLE_INFO:
+    case OP_SAMPLE_POS:
+    case OP_EVAL_SNAPPED:
+    case OP_EVAL_SAMPLE_INDEX:
+    case OP_EVAL_CENTROID:
+      Fail("'" + OpcodeName(opcode) +
+           "' needs per-sample evaluation, which GLSL ES does not provide");
+      return false;
+
+    // ---- read/write buffers and images --------------------------------------
+    case OP_LD_RAW: emitBufferLoad(false); break;
+    case OP_LD_STRUCTURED: emitBufferLoad(true); break;
+    case OP_STORE_RAW: emitBufferStore(false); break;
+    case OP_STORE_STRUCTURED: emitBufferStore(true); break;
+    case OP_LD_UAV_TYPED:
+    case OP_STORE_UAV_TYPED: {
+      if (operands.size() < 3) {
+        Fail(OpcodeName(opcode) + " with too few operands");
+        return false;
+      }
+      if (!Require(310, "a read/write image")) return false;
+      bool const isStore = opcode == OP_STORE_UAV_TYPED;
+      Operand const& imageOperand = isStore ? operands[0] : operands[2];
+      MappedStorage const* storage = StorageFor(imageOperand);
+      if (storage == nullptr) return false;
+      if (!storage->typedImage) {
+        Fail("'" + storage->name + "' is accessed as an image but is not a typed resource");
+        return false;
+      }
+      int coordinateComponents = 0;
+      switch (storage->dimension) {
+        case 4: coordinateComponents = 2; break;
+        case 5: case 8: coordinateComponents = 3; break;
+        default: break;
+      }
+      if (coordinateComponents == 0) {
+        Fail("a read/write image of a shape GLSL ES has no coordinate form for");
+        return false;
+      }
+      uint8_t const coordinateMask = static_cast<uint8_t>((1u << coordinateComponents) - 1u);
+      std::string const coordinate = VecType(coordinateComponents, "i") + "(" +
+                                     SrcInt(operands[1], coordinateMask) + ")";
+      if (isStore) {
+        Line("imageStore(" + storage->name + ", " + coordinate + ", " +
+             SrcFloat(operands[2], 0xf) + ");");
+        break;
+      }
+      WriteDest(instruction, operands[0],
+                "imageLoad(" + storage->name + ", " + coordinate + ")" +
+                    ResourceSwizzle(operands[2], destMask()));
+      break;
+    }
+    case OP_SYNC: {
+      if (!Require(310, "a compute barrier")) return false;
+      // The controls say which memory is being synchronised and whether the
+      // group is being joined; GLSL ES splits that across three calls.
+      uint32_t const flags = instruction.controls;
+      if (flags & 0x1u) Line("groupMemoryBarrier();");      // TGSM
+      if (flags & 0x2u) Line("groupMemoryBarrier();");      // TGSM group
+      if (flags & 0x4u) Line("memoryBarrierBuffer();");     // UAV group
+      if (flags & 0x8u) Line("memoryBarrier();");           // UAV global
+      if (flags & 0x10u) Line("barrier();");                // thread group sync
+      if (flags == 0) Line("memoryBarrier();");
+      break;
+    }
+
+    // ---- double precision ---------------------------------------------------
+    case OP_DADD: case OP_DMAX: case OP_DMIN: case OP_DMUL: case OP_DEQ: case OP_DGE:
+    case OP_DLT: case OP_DNE: case OP_DMOV: case OP_DMOVC: case OP_DTOF: case OP_FTOD:
+    case OP_DDIV: case OP_DFMA: case OP_DRCP: case OP_DTOI: case OP_DTOU: case OP_ITOD:
+    case OP_UTOD:
+      Fail("'" + OpcodeName(opcode) + "' is double-precision, which GLSL ES does not have");
+      return false;
+
+    // ---- control flow -------------------------------------------------------
     case OP_IF: {
       bool const testNonZero = ((instruction.controls >> 7) & 0x1u) != 0;
       Line("if (" + ScalarInt(operands[0]) + (testNonZero ? " != 0) {" : " == 0) {"));
@@ -2138,6 +3322,81 @@ bool GlslEmitter::EmitInstruction(Instruction const& instruction) {
       Line("default:");
       _indent++;
       break;
+    case OP_LABEL:
+      // Handled by EmitBody, which splits the stream into subroutines before
+      // any of it reaches here.
+      break;
+    case OP_CALL:
+    case OP_CALLC: {
+      size_t const labelIndex = opcode == OP_CALLC ? 1u : 0u;
+      if (operands.size() <= labelIndex || operands[labelIndex].indices.empty()) {
+        Fail("a call with no label");
+        return false;
+      }
+      std::string const target =
+          "subroutine" + std::to_string(operands[labelIndex].indices.back().immediate) + "();";
+      if (opcode == OP_CALL) {
+        Line(target);
+        break;
+      }
+      bool const testNonZero = ((instruction.controls >> 7) & 0x1u) != 0;
+      Line("if (" + ScalarInt(operands[0]) + (testNonZero ? " != 0) " : " == 0) ") + target);
+      break;
+    }
+
+    // ---- geometry shader output ---------------------------------------------
+    case OP_EMIT:
+    case OP_EMIT_STREAM:
+      Line("EmitVertex();");
+      break;
+    case OP_CUT:
+    case OP_CUT_STREAM:
+      Line("EndPrimitive();");
+      break;
+    case OP_EMITTHENCUT:
+    case OP_EMITTHENCUT_STREAM:
+      Line("EmitVertex();");
+      Line("EndPrimitive();");
+      break;
+
+    case OP_ABORT:
+    case OP_DEBUG_BREAK:
+      // Debug-only instructions with no runtime meaning.
+      break;
+
+    // ---- atomics -------------------------------------------------------------
+    case OP_ATOMIC_IADD: emitAtomic("atomicAdd", false); break;
+    case OP_ATOMIC_AND: emitAtomic("atomicAnd", false); break;
+    case OP_ATOMIC_OR: emitAtomic("atomicOr", false); break;
+    case OP_ATOMIC_XOR: emitAtomic("atomicXor", false); break;
+    case OP_ATOMIC_UMAX: emitAtomic("atomicMax", false); break;
+    case OP_ATOMIC_UMIN: emitAtomic("atomicMin", false); break;
+    case OP_ATOMIC_CMP_STORE: emitAtomic("atomicCompSwap", false); break;
+    case OP_IMM_ATOMIC_IADD: emitAtomic("atomicAdd", true); break;
+    case OP_IMM_ATOMIC_AND: emitAtomic("atomicAnd", true); break;
+    case OP_IMM_ATOMIC_OR: emitAtomic("atomicOr", true); break;
+    case OP_IMM_ATOMIC_XOR: emitAtomic("atomicXor", true); break;
+    case OP_IMM_ATOMIC_EXCH: emitAtomic("atomicExchange", true); break;
+    case OP_IMM_ATOMIC_CMP_EXCH: emitAtomic("atomicCompSwap", true); break;
+    case OP_IMM_ATOMIC_UMAX: emitAtomic("atomicMax", true); break;
+    case OP_IMM_ATOMIC_UMIN: emitAtomic("atomicMin", true); break;
+    case OP_ATOMIC_IMAX:
+    case OP_ATOMIC_IMIN:
+    case OP_IMM_ATOMIC_IMAX:
+    case OP_IMM_ATOMIC_IMIN:
+      // A signed atomic min/max needs an int-typed storage buffer; these are
+      // declared as uints because every other access reads them as bits.
+      Fail("'" + OpcodeName(opcode) + "' needs a signed storage buffer, and this shader's "
+           "buffers are declared unsigned");
+      return false;
+    case OP_IMM_ATOMIC_ALLOC:
+    case OP_IMM_ATOMIC_CONSUME:
+      Fail("append/consume buffers have no GLSL ES form");
+      return false;
+    case OP_MSAD:
+      Fail("'msad' (sum of absolute differences) has no GLSL ES form");
+      return false;
+
     default:
       Fail("instruction '" + OpcodeName(opcode) + "' is outside the translated subset");
       return false;
@@ -2149,11 +3408,69 @@ bool GlslEmitter::EmitInstruction(Instruction const& instruction) {
 
 namespace {
 
+// Splits the instruction stream into main() and one function per label, then
+// emits each.
+//
+// DXBC puts subroutines in the same stream as the main body: everything before
+// the first `label` is main, and each `label` starts a routine that runs to the
+// next one. `call` jumps to a label and `ret` comes back. Emitting the stream
+// as one block would run every subroutine inline, in order, which is not what
+// any of it means.
 bool GlslEmitter::EmitBody() {
-  for (auto const& instruction : _program.instructions) {
-    if (!EmitInstruction(instruction)) return false;
+  auto const& instructions = _program.instructions;
+
+  // Forward declarations first: a subroutine can call one declared after it.
+  std::vector<uint64_t> labels;
+  for (auto const& instruction : instructions) {
+    if (instruction.opcode != OP_LABEL) continue;
+    if (instruction.operands.empty() || instruction.operands[0].indices.empty()) {
+      Fail("a label with no index");
+      return false;
+    }
+    labels.push_back(instruction.operands[0].indices.back().immediate);
+  }
+  for (uint64_t label : labels) {
+    _functions += "void subroutine" + std::to_string(label) + "();\n";
+  }
+
+  size_t index = 0;
+  _target = &_body;
+  _indent = 1;
+  for (; index < instructions.size(); index++) {
+    if (instructions[index].opcode == OP_LABEL) break;
+    if (!EmitInstruction(instructions[index])) return false;
     if (_failed) return false;
   }
+
+  for (; index < instructions.size(); index++) {
+    Instruction const& instruction = instructions[index];
+    if (instruction.opcode == OP_LABEL) {
+      if (instruction.operands.empty() || instruction.operands[0].indices.empty()) {
+        Fail("a label with no index");
+        return false;
+      }
+      _functions += "void subroutine" +
+                    std::to_string(instruction.operands[0].indices.back().immediate) + "() {\n";
+      _subroutineBody.clear();
+      _target = &_subroutineBody;
+      _indent = 1;
+      // Emit this routine's instructions, then close it.
+      size_t next = index + 1;
+      for (; next < instructions.size(); next++) {
+        if (instructions[next].opcode == OP_LABEL) break;
+        if (!EmitInstruction(instructions[next])) return false;
+        if (_failed) return false;
+      }
+      _functions += _subroutineBody;
+      _functions += "}\n";
+      index = next - 1;
+      continue;
+    }
+    // Unreachable: the loop above only stops on a label.
+    Fail("an instruction outside both main and a subroutine");
+    return false;
+  }
+  _target = &_body;
   return true;
 }
 
@@ -2169,7 +3486,8 @@ GlslResult GlslEmitter::Run() {
     return result;
   }
 
-  if (!BuildSignatures() || !BuildConstantBuffers() || !BuildResources()) {
+  if (!BuildSignatures() || !BuildStageDeclarations() || !BuildConstantBuffers() ||
+      !BuildResources()) {
     result.error = _error;
     return result;
   }
@@ -2200,16 +3518,32 @@ GlslResult GlslEmitter::Run() {
     }
     addPrologue("vec4 x" + std::to_string(temp.index) + "[" + std::to_string(temp.arraySize) + "];");
   }
-  for (auto const& element : _program.inputSignature) {
-    if (element.systemValueType == 9) {
-      // HLSL's front-face input is a bool that the bytecode reads as an
-      // all-bits-set integer, which is not what a GLSL bool converts to.
-      addPrologue("vec4 vFrontFace = vec4(intBitsToFloat(gl_FrontFacing ? -1 : 0));");
-    } else if (element.semanticName == "SV_VertexID") {
-      addPrologue("int vVertexID = gl_VertexID;");
-    } else if (element.semanticName == "SV_InstanceID") {
-      addPrologue("int vInstanceID = gl_InstanceID;");
-    }
+  // The built-in aliases. Every one of these is a GLSL built-in of some scalar
+  // or integer type, and the register model reads registers as vec4s, so each
+  // is bit-cast into one here instead of at every use.
+  if (_usedFrontFace) {
+    // HLSL's front-face input is a bool that the bytecode reads as an
+    // all-bits-set integer, which is not what a GLSL bool converts to.
+    addPrologue("vec4 vFrontFace = vec4(intBitsToFloat(gl_FrontFacing ? -1 : 0));");
+  }
+  if (_usedVertexID) addPrologue("vec4 vVertexID = intBitsToFloat(ivec4(gl_VertexID));");
+  if (_usedInstanceID) addPrologue("vec4 vInstanceID = intBitsToFloat(ivec4(gl_InstanceID));");
+  if (_usedPrimitiveID) addPrologue("vec4 vPrimitiveID = intBitsToFloat(ivec4(gl_PrimitiveID));");
+  if (_usedSampleIndex) addPrologue("vec4 vSampleIndex = intBitsToFloat(ivec4(gl_SampleID));");
+  if (_usedGsInstanceID) {
+    addPrologue("vec4 vGsInstanceID = intBitsToFloat(ivec4(gl_InvocationID));");
+  }
+  if (_usedThreadID) {
+    addPrologue("vec4 vThreadID = uintBitsToFloat(uvec4(gl_GlobalInvocationID, 0u));");
+  }
+  if (_usedThreadGroupID) {
+    addPrologue("vec4 vThreadGroupID = uintBitsToFloat(uvec4(gl_WorkGroupID, 0u));");
+  }
+  if (_usedThreadIDInGroup) {
+    addPrologue("vec4 vThreadIDInGroup = uintBitsToFloat(uvec4(gl_LocalInvocationID, 0u));");
+  }
+  if (_usedThreadIDFlattened) {
+    addPrologue("vec4 vThreadIDInGroupFlattened = uintBitsToFloat(uvec4(gl_LocalInvocationIndex));");
   }
 
   std::string immediateBuffer;
@@ -2234,20 +3568,32 @@ GlslResult GlslEmitter::Run() {
   }
 
   std::string source;
-  source += "#version " + std::to_string(_options.version) + " es\n";
+  source += "#version " + std::to_string(_version) + " es\n";
   source += "precision highp float;\n";
   source += "precision highp int;\n";
   source += _declarations;
   source += immediateBuffer;
-  source += "void main() {\n";
-  source += prologue;
-  source += _body;
-  source += "}\n";
+  // Subroutines have to be able to reach the temps, and DXBC gives them one
+  // shared register file rather than a stack frame, so the registers are file
+  // scope and main() only initialises what needs initialising.
+  if (!_functions.empty()) {
+    source += prologue;
+    source += _functions;
+    source += "void main() {\n";
+    source += _body;
+    source += "}\n";
+  } else {
+    source += "void main() {\n";
+    source += prologue;
+    source += _body;
+    source += "}\n";
+  }
 
   result.ok = true;
   result.source = std::move(source);
   result.uniforms = _uniformNames;
   result.samplers = _samplerList;
+  result.version = _version;
   return result;
 }
 

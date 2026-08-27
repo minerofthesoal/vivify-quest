@@ -340,9 +340,16 @@ check("cube coordinates", "texture(_Cube, vs_TEXCOORD0.xyz)" in source, source)
 proc, fields, _, source = run("glsl", pixel_shader(body, textures=(("_Volume", 8),), temps=0))
 check("3d sampler", "uniform highp sampler3D _Volume;" in source, source)
 
+# A buffer texture has no sampler state and no mip chain: GLSL ES can only
+# fetch it by texel, so a filtered fetch from one is refused rather than
+# emitted as a texture() call that would not compile.
 proc, fields, _, source = run("glsl", pixel_shader(body, textures=(("_Buffer", 1),), temps=0))
-check("buffer texture refused", fields.get("ok") == "0", source)
-check("buffer texture reason", "sampler" in fields.get("error", ""), fields.get("error", ""))
+check("filtered fetch from a buffer texture refused", fields.get("ok") == "0", source)
+check("filtered fetch reason names the texture", "_Buffer" in fields.get("error", ""),
+      fields.get("error", ""))
+
+proc, fields, _, source = run("glsl", pixel_shader(body, textures=(("_MS", 6),), temps=0))
+check("filtered fetch from a multisample texture refused", fields.get("ok") == "0", source)
 
 # sample_l carries its lod through.
 body = m.insn(SAMPLE_L, m.dest(OUTPUT, 0), m.src(INPUT, 0), m.src(RESOURCE, 0),
@@ -360,16 +367,27 @@ check("resource swizzle", "texture(_MainTex, vs_TEXCOORD0.xy).w" in source, sour
 # Refusals
 # ---------------------------------------------------------------------------
 
-body = m.insn(SWAPC, m.dest(TEMP, 0), m.dest(TEMP, 0), m.src(TEMP, 0), m.src(TEMP, 0),
-              m.src(TEMP, 0))
+MSAD = 213
+body = m.insn(MSAD, m.dest(TEMP, 0), m.src(TEMP, 0), m.src(TEMP, 0), m.src(TEMP, 0))
+body += m.insn(MOV, m.dest(OUTPUT, 0), m.src(TEMP, 0))
 proc, fields, _, _ = run("glsl", pixel_shader(body))
 check("unsupported opcode refused", fields.get("ok") == "0", fields.get("error", ""))
-check("unsupported opcode named", "swapc" in fields.get("error", ""), fields.get("error", ""))
+check("unsupported opcode named", "msad" in fields.get("error", ""), fields.get("error", ""))
 
-geometry = m.container([m.shex_chunk([m.insn(RET)], stage=2)])
-proc, fields, _, _ = run("glsl", geometry)
-check("geometry refused", fields.get("ok") == "0", fields.get("error", ""))
-check("geometry reason", "geometry" in fields.get("error", ""), fields.get("error", ""))
+DADD = 191
+body = m.insn(DADD, m.dest(TEMP, 0), m.src(TEMP, 0), m.src(TEMP, 0))
+body += m.insn(MOV, m.dest(OUTPUT, 0), m.src(TEMP, 0))
+proc, fields, _, _ = run("glsl", pixel_shader(body))
+check("double precision refused", fields.get("ok") == "0", fields.get("error", ""))
+check("double precision reason", "double" in fields.get("error", ""), fields.get("error", ""))
+
+# Tessellation is the one stage left untranslated, and on purpose: a hull
+# program is several instruction streams with their own register spaces, and
+# getting it wrong is worse than not doing it.
+hull = m.container([m.shex_chunk([m.insn(RET)], stage=3)])
+proc, fields, _, _ = run("glsl", hull)
+check("hull refused", fields.get("ok") == "0", fields.get("error", ""))
+check("hull reason", "tessellation" in fields.get("error", ""), fields.get("error", ""))
 
 sm3 = m.container([m.shex_chunk([m.insn(RET)], stage=1, major=3)])
 proc, fields, _, _ = run("glsl", sm3)
@@ -384,6 +402,243 @@ noreflect = m.container([
 proc, fields, _, _ = run("glsl", noreflect)
 check("undeclared cbuffer refused", fields.get("ok") == "0", fields.get("error", ""))
 check("undeclared cbuffer reason", "b0" in fields.get("error", ""), fields.get("error", ""))
+
+# ---------------------------------------------------------------------------
+# Everything the first version of this translator refused
+# ---------------------------------------------------------------------------
+
+DCL_SAMPLER_C = 90
+SAMPLE_C, SAMPLE_C_LZ, GATHER4, LD_MS, RESINFO_OP = 70, 71, 109, 46, 61
+BFI, UBFE, IBFE, BFREV, COUNTBITS = 140, 138, 139, 141, 134
+FIRSTBIT_HI, FIRSTBIT_LO, F32TOF16, F16TOF32 = 135, 136, 130, 131
+UADDC, SWAPC_OP, IMUL_OP, LABEL_OP, CALL_OP = 132, 142, 38, 44, 4
+DCL_THREAD_GROUP, DCL_UAV_RAW, STORE_RAW, LD_RAW = 155, 157, 166, 165
+DCL_TGSM_RAW, SYNC, IMM_ATOMIC_IADD = 159, 190, 180
+EMIT, CUT, DCL_GS_INPUT_PRIMITIVE, DCL_GS_OUTPUT_TOPOLOGY, DCL_MAXOUT = 19, 9, 93, 92, 94
+
+# A compile-time texel offset changes which texel is read. The first version of
+# this decoder parsed the extended token and threw it away, which is a silent
+# wrong answer -- the worst kind. It now becomes GLSL's offset argument.
+body = m.insn(SAMPLE, m.dest(OUTPUT, 0), m.src(INPUT, 0), m.src(RESOURCE, 0),
+              m.src(SAMPLER_T, 0))
+offset_token = 1 | ((1 & 0xF) << 9) | ((-2 & 0xF) << 13)
+body = [body[0] | 0x80000000] + [offset_token] + body[1:]
+body[0] = (body[0] & ~(0x7F << 24)) | ((len(body)) << 24)
+proc, fields, _, source = run("glsl", pixel_shader(body, temps=0))
+check("sample offset survives", "textureOffset(_MainTex, vs_TEXCOORD0.xy, ivec2(1, -2))" in source,
+      source + fields.get("error", ""))
+
+# nointerpolation on an input is not cosmetic: an integer varying interpolated
+# linearly arrives as garbage, which is why D3D marks those constant.
+body = m.insn(MOV, m.dest(OUTPUT, 0), m.src(INPUT, 0))
+flat_shader = pixel_shader(body, temps=0)
+proc, fields, _, source = run("glsl", flat_shader)
+check("smooth varying has no qualifier", "\nin vec4 vs_TEXCOORD0;" in source, source)
+
+
+def pixel_with_dcl_ps_mode(mode):
+    """Rebuilds the fragment fixture with a chosen interpolation mode."""
+    isgn = m.signature_chunk([
+        {"name": "TEXCOORD", "index": 0, "register": 0, "mask": 0x3, "rw_mask": 0x3}], b"ISGN")
+    osgn = m.signature_chunk([
+        {"name": "SV_Target", "index": 0, "register": 0, "rw_mask": 0}], b"OSGN")
+    rdef = globals_cbuffer([variable("_Color", 0, 16, VECTOR4)], 16)
+    code = m.insn(DCL_INPUT_PS, m.dest(INPUT, 0, 0x3), controls=mode)
+    code += m.insn(DCL_OUTPUT, m.dest(OUTPUT, 0))
+    code += m.insn(MOV, m.dest(OUTPUT, 0), m.src(INPUT, 0))
+    code += m.insn(RET)
+    return m.container([rdef, isgn, osgn, m.shex_chunk([code], stage=0)])
+
+
+proc, fields, _, source = run("glsl", pixel_with_dcl_ps_mode(1))
+check("nointerpolation becomes flat", "flat in vec4 vs_TEXCOORD0;" in source, source)
+proc, fields, _, source = run("glsl", pixel_with_dcl_ps_mode(3))
+check("centroid survives", "centroid in vec4 vs_TEXCOORD0;" in source, source)
+
+# Depth comparison needs a shadow sampler, and the comparison value folds into
+# the coordinate.
+body = m.insn(SAMPLE_C_LZ, m.dest(OUTPUT, 0), m.src(INPUT, 0), m.src(RESOURCE, 0),
+              m.src(SAMPLER_T, 0), m.src_cb(0, 0, (X, X, X, X)))
+proc, fields, _, source = run("glsl", pixel_shader(body, textures=(("_ShadowMap", 4),), temps=0))
+check("shadow sampler declared", "uniform highp sampler2DShadow _ShadowMap;" in source,
+      source + fields.get("error", ""))
+check("comparison folds into the coordinate",
+      "texture(_ShadowMap, vec3(vs_TEXCOORD0.xy, _Color.x))" in source, source)
+
+# gather4 is GLSL ES 3.10, so the version escalates on its own.
+body = m.insn(GATHER4, m.dest(OUTPUT, 0), m.src(INPUT, 0), m.src(RESOURCE, 0, (Y, Y, Y, Y)),
+              m.src(SAMPLER_T, 0))
+proc, fields, _, source = run("glsl", pixel_shader(body, temps=0))
+check("gather4 translates", fields.get("ok") == "1", fields.get("error", ""))
+check("gather4 escalates the version", source.startswith("#version 310 es"), source[:20])
+check("gather4 picks its channel", "textureGather(_MainTex, vs_TEXCOORD0.xy, 1)" in source, source)
+
+# Bit manipulation.
+body = m.insn(COUNTBITS, m.dest(OUTPUT, 0, 0x1), m.src(TEMP, 0))
+proc, fields, _, source = run("glsl", pixel_shader(body))
+check("countbits", "uintBitsToFloat(uint(bitCount(floatBitsToUint(r0.x))))" in source,
+      source + fields.get("error", ""))
+
+body = m.insn(BFREV, m.dest(OUTPUT, 0, 0x1), m.src(TEMP, 0))
+proc, fields, _, source = run("glsl", pixel_shader(body))
+check("bfrev", "bitfieldReverse(floatBitsToUint(r0.x))" in source, source)
+
+body = m.insn(FIRSTBIT_HI, m.dest(OUTPUT, 0, 0x1), m.src(TEMP, 0))
+proc, fields, _, source = run("glsl", pixel_shader(body))
+check("firstbit_hi counts from the high end", "(31 - findMSB(" in source, source)
+
+body = m.insn(FIRSTBIT_LO, m.dest(OUTPUT, 0, 0x1), m.src(TEMP, 0))
+proc, fields, _, source = run("glsl", pixel_shader(body))
+check("firstbit_lo is findLSB", "findLSB(" in source, source)
+
+body = m.insn(UBFE, m.dest(OUTPUT, 0, 0x1), m.imm_int(8), m.imm_int(4), m.src(TEMP, 0))
+proc, fields, _, source = run("glsl", pixel_shader(body))
+check("ubfe masks its width and offset to five bits",
+      "bitfieldExtract(floatBitsToUint(r0.x), (4) & 31, (8) & 31)" in source,
+      source + fields.get("error", ""))
+
+body = m.insn(BFI, m.dest(OUTPUT, 0, 0x1), m.imm_int(8), m.imm_int(4), m.src(TEMP, 0),
+              m.src(TEMP, 0))
+proc, fields, _, source = run("glsl", pixel_shader(body))
+check("bfi", "bitfieldInsert(" in source, source + fields.get("error", ""))
+
+body = m.insn(F32TOF16, m.dest(OUTPUT, 0, 0x1), m.src(TEMP, 0))
+proc, fields, _, source = run("glsl", pixel_shader(body))
+check("f32tof16 keeps only the low half", "packHalf2x16(vec2(r0.x, 0.0)) & 0xffffu" in source,
+      source + fields.get("error", ""))
+
+body = m.insn(F16TOF32, m.dest(OUTPUT, 0, 0x1), m.src(TEMP, 0))
+proc, fields, _, source = run("glsl", pixel_shader(body))
+check("f16tof32", "unpackHalf2x16(floatBitsToUint(r0.x) & 0xffffu).x" in source, source)
+
+body = m.insn(UADDC, m.dest(TEMP, 0, 0x1), m.dest(TEMP, 0, 0x2), m.src(TEMP, 0), m.src(TEMP, 0))
+body += m.insn(MOV, m.dest(OUTPUT, 0), m.src(TEMP, 0))
+proc, fields, _, source = run("glsl", pixel_shader(body))
+check("uaddc uses uaddCarry", "uaddCarry(" in source, source + fields.get("error", ""))
+check("uaddc escalates the version", source.startswith("#version 310 es"), source[:20])
+
+body = m.insn(SWAPC_OP, m.dest(TEMP, 0, 0x1), m.dest(TEMP, 0, 0x2), m.src(TEMP, 0),
+              m.src(TEMP, 0), m.src(TEMP, 0))
+body += m.insn(MOV, m.dest(OUTPUT, 0), m.src(TEMP, 0))
+proc, fields, _, source = run("glsl", pixel_shader(body))
+check("swapc reads both sources before writing either", source.count("swapA") >= 2,
+      source + fields.get("error", ""))
+
+# The high half of a 32x32 multiply.
+body = m.insn(IMUL_OP, m.dest(TEMP, 0, 0x1), m.src_null(), m.src(TEMP, 0), m.src(TEMP, 0))
+body += m.insn(MOV, m.dest(OUTPUT, 0), m.src(TEMP, 0))
+proc, fields, _, source = run("glsl", pixel_shader(body))
+check("imul high half uses imulExtended", "imulExtended(" in source,
+      source + fields.get("error", ""))
+
+# Subroutines: everything before the first label is main, and each label is a
+# function of its own. Emitting the stream as one block would run every
+# subroutine inline, in order.
+body = m.insn(CALL_OP, m.src(m.OPERAND_LABEL, 3))
+body += m.insn(MOV, m.dest(OUTPUT, 0), m.src(TEMP, 0))
+body += m.insn(RET)
+body += m.insn(LABEL_OP, m.src(m.OPERAND_LABEL, 3))
+body += m.insn(MOV, m.dest(TEMP, 0), m.src_cb(0, 0))
+body += m.insn(RET)
+proc, fields, _, source = run("glsl", pixel_shader(body))
+check("subroutine becomes a function", "void subroutine3() {" in source,
+      source + fields.get("error", ""))
+check("subroutine is forward declared", "void subroutine3();" in source, source)
+check("call becomes a call", "subroutine3();" in source, source)
+check("registers are file scope when subroutines exist",
+      source.index("vec4 r0;") < source.index("void subroutine3() {"), source)
+
+# ---------------------------------------------------------------------------
+# Compute and geometry
+# ---------------------------------------------------------------------------
+
+def compute_shader(body, bindings=(), tgsm=None):
+    rdef = m.rdef_chunk(constant_buffers=[], bindings=list(bindings))
+    code = m.insn(DCL_THREAD_GROUP, extra=[64, 1, 1])
+    if tgsm is not None:
+        code += m.insn(DCL_TGSM_RAW, m.dest(m.OPERAND_THREAD_GROUP_SHARED_MEMORY, 0),
+                       extra=[tgsm])
+    code += m.insn(DCL_TEMPS, extra=[1])
+    code += body
+    code += m.insn(RET)
+    return m.container([rdef, m.shex_chunk([code], stage=5)])
+
+
+UAV = m.OPERAND_UNORDERED_ACCESS_VIEW
+raw_uav = ({"name": "_Result", "type": 8, "dimension": 0, "bind_point": 0},)
+body = m.insn(MOV, m.dest(TEMP, 0), m.src(m.OPERAND_INPUT_THREAD_ID, None))
+body += m.insn(STORE_RAW, m.dest(UAV, 0, 0x1), m.src(TEMP, 0, (X, X, X, X)),
+               m.src(TEMP, 0, (X, X, X, X)))
+proc, fields, _, source = run("glsl", compute_shader(body, raw_uav))
+check("compute translates", fields.get("ok") == "1", fields.get("error", ""))
+check("work group size declared", "layout(local_size_x = 64, local_size_y = 1, "
+      "local_size_z = 1) in;" in source, source)
+check("storage buffer declared", "buffer _Result_block { uint _Result[]; };" in source, source)
+check("thread id aliased once",
+      "vec4 vThreadID = uintBitsToFloat(uvec4(gl_GlobalInvocationID, 0u));" in source, source)
+check("compute escalates the version", source.startswith("#version 310 es"), source[:20])
+
+body = m.insn(SYNC, controls=(1 << 4))
+body += m.insn(LD_RAW, m.dest(TEMP, 0, 0x1), m.imm_int(0), m.src(m.OPERAND_RESOURCE, 0))
+proc, fields, _, source = run("glsl", compute_shader(
+    body, ({"name": "_Source", "type": 7, "dimension": 0, "bind_point": 0},)))
+check("sync becomes barrier", "barrier();" in source, source + fields.get("error", ""))
+check("read-only buffer is readonly", "readonly buffer _Source_block" in source, source)
+
+body = m.insn(IMM_ATOMIC_IADD, m.dest(TEMP, 0, 0x1), m.dest(UAV, 0, 0x1), m.imm_int(0),
+              m.imm_int(1))
+proc, fields, _, source = run("glsl", compute_shader(body, raw_uav))
+check("imm_atomic_iadd returns the old value", "atomicAdd(_Result[" in source,
+      source + fields.get("error", ""))
+
+
+def geometry_shader():
+    isgn = m.signature_chunk([{"name": "TEXCOORD", "index": 0, "register": 0}], b"ISGN")
+    osgn = m.signature_chunk([{"name": "COLOR", "index": 0, "register": 0}], b"OSGN")
+    code = m.insn(DCL_GS_INPUT_PRIMITIVE, controls=3)
+    code += m.insn(DCL_MAXOUT, extra=[3])
+    code += m.insn(DCL_GS_OUTPUT_TOPOLOGY, controls=5)
+    code += m.insn(DCL_TEMPS, extra=[1])
+    vertex_in = m._operand(m.OPERAND_INPUT, [1, 0], swizzle=(X, Y, Z, W))
+    code += m.insn(MOV, m.dest(m.OPERAND_OUTPUT, 0), vertex_in)
+    code += m.insn(EMIT)
+    code += m.insn(CUT)
+    code += m.insn(RET)
+    return m.container([isgn, osgn, m.shex_chunk([code], stage=2)])
+
+
+proc, fields, _, source = run("glsl", geometry_shader())
+check("geometry translates", fields.get("ok") == "1", fields.get("error", ""))
+check("geometry vertex count survives", "max_vertices = 3" in source, source)
+check("geometry escalates to 3.20", source.startswith("#version 320 es"), source[:20])
+check("geometry input layout", "layout(triangles) in;" in source, source)
+check("geometry output layout", "layout(triangle_strip, max_vertices = 3) out;" in source, source)
+check("geometry inputs are arrays", "in vec4 vs_TEXCOORD0[];" in source, source)
+check("geometry reads per vertex", "vs_TEXCOORD0[1]" in source, source)
+check("emit", "EmitVertex();" in source, source)
+check("geometry writes its own varying", "out vec4 vs_COLOR0;" in source, source)
+check("cut", "EndPrimitive();" in source, source)
+
+
+def geometry_passthrough():
+    """A geometry shader that passes a semantic straight through."""
+    isgn = m.signature_chunk([{"name": "TEXCOORD", "index": 0, "register": 0}], b"ISGN")
+    osgn = m.signature_chunk([{"name": "TEXCOORD", "index": 0, "register": 0}], b"OSGN")
+    code = m.insn(DCL_GS_INPUT_PRIMITIVE, controls=3)
+    code += m.insn(DCL_MAXOUT, extra=[3])
+    code += m.insn(DCL_GS_OUTPUT_TOPOLOGY, controls=5)
+    code += m.insn(MOV, m.dest(m.OPERAND_OUTPUT, 0),
+                   m._operand(m.OPERAND_INPUT, [1, 0], swizzle=(X, Y, Z, W)))
+    code += m.insn(EMIT)
+    code += m.insn(RET)
+    return m.container([isgn, osgn, m.shex_chunk([code], stage=2)])
+
+
+proc, fields, _, source = run("glsl", geometry_passthrough())
+check("a pass-through geometry varying is refused, not redeclared",
+      fields.get("ok") == "0", source)
+check("pass-through refusal explains the name clash",
+      "both its input and its output" in fields.get("error", ""), fields.get("error", ""))
 
 # ---------------------------------------------------------------------------
 # Malformed input

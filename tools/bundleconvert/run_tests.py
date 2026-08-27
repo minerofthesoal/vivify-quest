@@ -223,7 +223,7 @@ DX11_PIXEL_SM50 = 18
 GLES3_PLATFORM = 9
 
 MUL, MAD, ADD, RET, DCL_TEMPS, DCL_INPUT, DCL_OUTPUT, DCL_OUTPUT_SIV = 56, 50, 0, 62, 104, 95, 101, 103
-SAMPLE, DCL_SAMPLER, DCL_RESOURCE, DCL_INPUT_PS, SWAPC = 69, 90, 88, 98, 142
+SAMPLE, DCL_SAMPLER, DCL_RESOURCE, DCL_INPUT_PS, MSAD = 69, 90, 88, 98, 213
 
 
 def dxbc_vertex():
@@ -248,15 +248,17 @@ def dxbc_vertex():
 
 
 def dxbc_untranslatable():
-    """Same framing, but using an instruction outside the translated subset."""
+    """Same framing, but using an instruction outside the translated subset.
+
+    msad is a sum-of-absolute-differences instruction with no GLSL ES form at
+    all, so it stays outside the subset however far the translator grows."""
     isgn = dx.signature_chunk([{"name": "POSITION", "index": 0, "register": 0}], b"ISGN")
     osgn = dx.signature_chunk(
         [{"name": "SV_POSITION", "index": 0, "register": 0, "sv": 1, "rw_mask": 0}], b"OSGN")
     code = []
     code += dx.insn(DCL_TEMPS, extra=[1])
-    code += dx.insn(SWAPC, dx.dest(dx.OPERAND_TEMP, 0), dx.dest(dx.OPERAND_TEMP, 0),
-                    dx.src(dx.OPERAND_TEMP, 0), dx.src(dx.OPERAND_TEMP, 0),
-                    dx.src(dx.OPERAND_TEMP, 0))
+    code += dx.insn(MSAD, dx.dest(dx.OPERAND_TEMP, 0), dx.src(dx.OPERAND_TEMP, 0),
+                    dx.src(dx.OPERAND_TEMP, 0), dx.src(dx.OPERAND_TEMP, 0))
     code += dx.insn(RET)
     return dx.container([isgn, osgn, dx.shex_chunk([code], stage=1)])
 
@@ -351,7 +353,7 @@ def expect_refused(proc, fields, refusals, dst):
         return f"status '{fields.get('status')}' (nothing translated, nothing to retarget)"
     if fields.get("refused") != "1":
         return f"refused={fields.get('refused')}"
-    if not refusals or "swapc" not in refusals[0]:
+    if not refusals or "msad" not in refusals[0]:
         return f"refusal did not name the instruction: {refusals}"
     return None
 

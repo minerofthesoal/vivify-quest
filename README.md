@@ -556,7 +556,32 @@ exists today:
    reason: those are the names Unity's own GLES shaders use and the ones the
    engine matches against.
 
-   Anything outside the subset fails by name -- "instruction 'swapc' is outside
+   *Coverage.* Vertex, fragment, geometry and compute programs; every Shader
+   Model 4/5 arithmetic, bit-manipulation and control-flow instruction,
+   including subroutines (`label`/`call`), `switch`, and the two-destination
+   forms (`sincos`, `imul`, `udiv`, `uaddc`, `swapc`); the whole sampling
+   family -- `sample`, `_l`, `_b`, `_d`, `_c`, `_c_lz`, `gather4`, `ld`,
+   `ld_ms`, `resinfo`, `bufinfo` -- with compile-time texel offsets, shadow
+   samplers and integer samplers; structured, raw and read/write buffers with
+   their atomics; thread-group shared memory and barriers.
+
+   The output version is not fixed. A plain vertex or fragment shader stays at
+   GLSL ES 3.00; `textureGather`, `uaddCarry`, `imulExtended`, multisample
+   fetches and storage buffers raise it to 3.10, geometry shaders and
+   `textureGatherOffset` to 3.20. Quest's Adreno parts expose 3.2 and Unity
+   compiles the source on the device, so this costs nothing where it is not
+   needed.
+
+   What is deliberately *not* translated, in each case because a wrong answer
+   would be worse than none: tessellation (a hull program is several
+   instruction streams with their own register spaces); double precision, which
+   GLSL ES does not have; per-sample evaluation (`eval_*`, `sample_pos`);
+   `msad`; append/consume buffers; and a geometry shader that passes a semantic
+   straight through, which would need one varying name to be both an input and
+   an output -- programs are translated one at a time, so the pipeline-wide
+   rename that needs is not available.
+
+   Anything outside the subset fails by name -- "instruction 'msad' is outside
    the translated subset" -- rather than emitting plausible wrong GLSL, and a
    shader that does not translate is left exactly as it was. It keeps its
    DirectX programs, does not run here, and falls to the stand-in path, which
@@ -565,7 +590,7 @@ exists today:
    `ConvertShadersToGles` is the whole thing end to end, and it is what the
    on-device conversion runs (settings: "Translate Shaders On Conversion").
 
-   Tested by `tools/dxbc/`: 73 checks under ASan/UBSan against hand-assembled
+   Tested by `tools/dxbc/`: 121 checks under ASan/UBSan against hand-assembled
    containers, plus five end-to-end cases in `tools/bundleconvert/`. There is
    no DirectX compiler on a Linux host and no Quest here, so the fixtures are
    written from the format documentation rather than captured from fxc. That

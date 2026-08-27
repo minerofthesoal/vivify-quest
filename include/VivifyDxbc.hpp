@@ -11,13 +11,20 @@
 // here.
 //
 // Unity's own cross-compiler (HLSLcc) is roughly thirty thousand lines and is
-// not what this is. This is a direct translator for the subset of Shader Model
-// 4/5 that Unity's compiler actually emits for the kind of shader a Vivify map
-// ships -- unlit, effect, raymarch and blit shaders. Anything outside that
-// subset fails by name rather than by producing plausible-looking wrong GLSL:
-// a shader that does not translate keeps the stand-in path it has today, which
-// is a worse look but a working frame. Silently emitting a shader that compiles
-// and draws the wrong thing would be worse than both.
+// not what this is. This is a direct translator for Shader Model 4/5: vertex,
+// fragment, geometry and compute programs; every arithmetic, bit-manipulation
+// and control-flow instruction including subroutines; the whole sampling family
+// with texel offsets, shadow samplers and integer samplers; and structured, raw
+// and read/write buffers with their atomics.
+//
+// What it does not do, in each case because a wrong answer would be worse than
+// none: tessellation, double precision, per-sample evaluation, msad,
+// append/consume buffers, and a geometry shader that passes a semantic straight
+// through. Anything outside the subset fails by name rather than by producing
+// plausible-looking wrong GLSL: a shader that does not translate keeps the
+// stand-in path it has today, which is a worse look but a working frame.
+// Silently emitting a shader that compiles and draws the wrong thing would be
+// worse than both.
 //
 // Everything here is fed untrusted bundle bytes, so every read is bounds-checked
 // against the buffer it was handed and every count is validated before it is
@@ -113,15 +120,31 @@ enum : uint32_t {
   kOperandNull = 13,
   kOperandRasterizer = 14,
   kOperandOutputCoverageMask = 15,
+  kOperandStream = 16,
+  kOperandFunctionBody = 17,
+  kOperandFunctionTable = 18,
+  kOperandInterface = 19,
+  kOperandFunctionInput = 20,
+  kOperandFunctionOutput = 21,
+  kOperandOutputControlPointID = 22,
+  kOperandInputForkInstanceID = 23,
+  kOperandInputJoinInstanceID = 24,
+  kOperandInputControlPoint = 25,
+  kOperandOutputControlPoint = 26,
+  kOperandInputPatchConstant = 27,
+  kOperandInputDomainPoint = 28,
+  kOperandThisPointer = 29,
+  kOperandUnorderedAccessView = 30,
+  kOperandThreadGroupSharedMemory = 31,
   kOperandInputThreadID = 32,
   kOperandInputThreadGroupID = 33,
   kOperandInputThreadIDInGroup = 34,
   kOperandInputCoverageMask = 35,
   kOperandInputThreadIDInGroupFlattened = 36,
-  kOperandInputDomainPoint = 37,
-  kOperandInputPrimitiveIDDomain = 38,
-  kOperandOutputDepthGreaterEqual = 39,
-  kOperandOutputDepthLessEqual = 40,
+  kOperandInputGsInstanceID = 37,
+  kOperandOutputDepthGreaterEqual = 38,
+  kOperandOutputDepthLessEqual = 39,
+  kOperandCycleCounter = 40,
 };
 
 // Source modifiers, from an operand's extended token.
@@ -165,7 +188,20 @@ struct Instruction {
   bool extended = false;
   uint32_t lengthDwords = 0;
   std::vector<Operand> operands;
+  // Trailing dwords the opcode carries outside its operands, and outside its
+  // extended tokens: dcl_temps' count, dcl_resource's return-type token,
+  // dcl_thread_group's three sizes.
   std::vector<uint32_t> extra;
+  // The extended opcode tokens, kept apart from `extra` because they are a
+  // different thing that happens to sit next to it. Dropping a sample-offset
+  // token silently would translate a texture fetch to the wrong texel.
+  std::vector<uint32_t> extendedTokens;
+  // Decoded from an extended SAMPLE_CONTROLS token: the compile-time texel
+  // offset applied to a fetch.
+  bool hasSampleOffsets = false;
+  int32_t sampleOffsetU = 0;
+  int32_t sampleOffsetV = 0;
+  int32_t sampleOffsetW = 0;
   // Byte offset of this instruction's first token inside the bytecode chunk,
   // for error messages that have to point somewhere.
   uint32_t tokenOffset = 0;
@@ -192,6 +228,9 @@ struct Program {
   // Filled from the declarations in the instruction stream.
   uint32_t tempCount = 0;
   uint32_t globalFlags = 0;
+  // Geometry shaders only: the declared ceiling on emitted vertices, which
+  // GLSL needs as a layout qualifier rather than a declaration of its own.
+  uint32_t maxOutputVertexCount = 0;
   // Indexable temps: index -> {array size, component count}.
   struct IndexableTemp {
     uint32_t index = 0;
@@ -223,15 +262,25 @@ std::string OpcodeName(uint32_t opcode);
 struct GlslResult {
   bool ok = false;
   std::string error;        // set when ok is false: which construct stopped it
-  std::string source;       // GLSL ES 3.00 source, when ok
+  std::string source;       // GLSL ES source, when ok
   // Uniform/sampler names the emitted source declares, in declaration order.
   std::vector<std::string> uniforms;
   std::vector<std::string> samplers;
+  // The GLSL ES version actually emitted (300, 310 or 320).
+  int version = 0;
 };
 
 struct GlslOptions {
-  // Beat Saber's Quest renderer is GLES3. 300 emits "#version 300 es".
+  // The lowest GLSL ES version to emit. The translator raises this by itself
+  // when an instruction needs a later one -- textureGather and uaddCarry are
+  // 3.10, geometry shaders 3.20 -- so the default is a floor, not a target.
+  // Quest's Adreno parts expose GLES 3.2, and Unity compiles the source on the
+  // device at load time, so an escalated version is not a portability problem.
   int version = 300;
+  // The highest version the translator may escalate to. A shader needing more
+  // than this is refused rather than emitted against a version the device may
+  // not have.
+  int maximumVersion = 320;
   // Name given to the fragment output when the signature has no name for it.
   std::string defaultFragmentOutput = "SV_Target";
 };

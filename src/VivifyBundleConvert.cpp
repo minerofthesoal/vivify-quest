@@ -1084,14 +1084,23 @@ bool IsUnityBundleFile(std::string const& path) {
 
 namespace {
 
-// True for a ShaderGpuProgramType that carries DirectX bytecode this converter
-// knows how to translate.
+// True for a ShaderGpuProgramType that carries DirectX bytecode.
+//
+// Every DirectX stage is offered to the translator rather than filtered by
+// stage here. Which stages it can actually handle is its own business and it
+// says so by name -- a hull program comes back with "tessellation programs are
+// not translated" -- and keeping the decision in one place stops this list
+// drifting out of step with what the translator grew to support.
 bool IsTranslatableDirectXProgram(int32_t programType) {
   switch (programType) {
     case SerializedFileParse::kGpuProgramDX11VertexSM40:
     case SerializedFileParse::kGpuProgramDX11VertexSM50:
     case SerializedFileParse::kGpuProgramDX11PixelSM40:
     case SerializedFileParse::kGpuProgramDX11PixelSM50:
+    case SerializedFileParse::kGpuProgramDX11GeometrySM40:
+    case SerializedFileParse::kGpuProgramDX11GeometrySM50:
+    case SerializedFileParse::kGpuProgramDX11HullSM50:
+    case SerializedFileParse::kGpuProgramDX11DomainSM50:
       return true;
     default:
       return false;
