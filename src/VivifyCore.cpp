@@ -541,6 +541,8 @@ void Runtime::ResetRuntime(std::string_view reason) {
   _assets.clear();
   _assetsByName.clear();
   _supportedShadersByName.clear();
+  _gameShadersByName.clear();
+  _gameShaderIndexBuilt = false;
   _catchUpAppliedCustomEvents.clear();
   for (auto& [name, dt] : _declaredTextures) ReleaseDeclaredTextureData(dt);
   _declaredTextures.clear();

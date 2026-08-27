@@ -1090,10 +1090,60 @@ void Runtime::LogMaterialShader(std::string_view context, std::string_view asset
                    BoolText(IsInternalErrorShaderName(shaderName)));
 }
 
-UnityEngine::Shader* Runtime::FindUsableShader(std::string const& shaderName) const {
+// Indexes every supported shader loaded in this process by name, once per level.
+//
+// This is what makes a map's own shader names mean something. A PC bundle does
+// not only carry shaders the map author wrote: it carries a *copy* of every
+// shader its materials referenced, including the game's own and Unity's
+// built-ins, each compiled for DirectX and useless here. A real session log
+// shows the result:
+//
+//   material='snail' shader='BeatSaber/Standard' supported=false
+//   material='tube'  shader='BeatSaber/Tube_OptimizedNoise_FastMath' supported=false
+//   material='Disco_Lights' shader='Legacy Shaders/Particles/Additive' supported=false
+//
+// Beat Saber has BeatSaber/Standard. Unity has Legacy Shaders/Particles/
+// Additive. Both are sitting in the process, working, and the map wants exactly
+// them -- but Shader.Find returns the bundle's broken copy of the same name, it
+// fails the isSupported test, and the material was handed a generic stand-in
+// instead of the shader it actually asked for.
+//
+// Scanning for a shader that both matches the name and runs finds the real one.
+void Runtime::EnsureGameShaderIndex() {
+  if (_gameShaderIndexBuilt) return;
+  _gameShaderIndexBuilt = true;
+
+  auto allShaders = UnityEngine::Resources::FindObjectsOfTypeAll<UnityEngine::Shader*>();
+  if (!allShaders) return;
+  for (int i = 0; i < allShaders.size(); i++) {
+    auto* candidate = allShaders[i];
+    // Only shaders that run are indexed, so a bundle's dead copy of a name can
+    // never shadow the working one.
+    if (!IsAlive(candidate) || !candidate->get_isSupported()) continue;
+    auto name = candidate->get_name();
+    if (!name) continue;
+    std::string key = NormalizeAssetKey(ToStdString(name));
+    if (key.empty()) continue;
+    _gameShadersByName.emplace(std::move(key), candidate);
+  }
+  PaperLogger.info("Vivify shader index: {} runnable shader name(s) available in this process",
+                   _gameShadersByName.size());
+}
+
+UnityEngine::Shader* Runtime::FindUsableShader(std::string const& shaderName) {
   if (shaderName.empty()) return nullptr;
-  if (auto it = _supportedShadersByName.find(NormalizeAssetKey(shaderName));
+  auto const key = NormalizeAssetKey(shaderName);
+  if (auto it = _supportedShadersByName.find(key);
       it != _supportedShadersByName.end() && IsAlive(it->second) && it->second->get_isSupported()) {
+    return it->second;
+  }
+  // The map asked for this shader by name and something in the process answers
+  // to it. That is a far better answer than a generic stand-in: same name means
+  // same properties, so the material's colours and textures land where they
+  // were meant to.
+  EnsureGameShaderIndex();
+  if (auto it = _gameShadersByName.find(key);
+      it != _gameShadersByName.end() && IsAlive(it->second) && it->second->get_isSupported()) {
     return it->second;
   }
   // Deliberately the quiet lookup: this searches by *shader* name
@@ -1146,9 +1196,19 @@ UnityEngine::Shader* Runtime::FindFallbackShader() {
       "Unlit/Texture"sv,    "Unlit/Color"sv,        "Sprites/Default"sv,
       "UI/Default"sv,       "Standard"sv,
   };
+  // A stand-in that cannot be tinted is why notes came out white. Note and
+  // saber replacements are coloured by writing _Color into a
+  // MaterialPropertyBlock; Unlit/Texture -- which used to win this list -- has
+  // no _Color at all, so every write went nowhere and every replaced block
+  // rendered untinted. A shader is only acceptable here if the colour can
+  // actually land on it.
+  auto carriesColour = [](UnityEngine::Shader* shader) {
+    return shader->FindPropertyIndex(StringW("_Color")) >= 0 ||
+           shader->FindPropertyIndex(StringW("_BaseColor")) >= 0;
+  };
   for (auto name : preferredNames) {
     auto* candidate = UnityEngine::Shader::Find(StringW(std::string(name))).unsafePtr();
-    if (IsAlive(candidate) && candidate->get_isSupported()) {
+    if (IsAlive(candidate) && candidate->get_isSupported() && carriesColour(candidate)) {
       _fallbackShader = candidate;
       PaperLogger.info("Vivify fallback shader: using '{}'", ShaderNameForLog(candidate));
       return _fallbackShader;
