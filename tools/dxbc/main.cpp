@@ -36,6 +36,7 @@ void PrintProgram(Vivify::Dxbc::Program const& program) {
   if (!program.ok) return;
   std::cout << "stage=" << Vivify::Dxbc::StageName(program.stage) << "\n";
   std::cout << "version=" << program.majorVersion << "." << program.minorVersion << "\n";
+  std::cout << "containerOffset=" << program.containerOffset << "\n";
   std::cout << "instructions=" << program.instructions.size() << "\n";
   std::cout << "temps=" << program.tempCount << "\n";
   std::cout << "creator=" << program.creator << "\n";

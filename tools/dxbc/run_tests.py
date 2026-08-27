@@ -641,6 +641,48 @@ check("pass-through refusal explains the name clash",
       "both its input and its output" in fields.get("error", ""), fields.get("error", ""))
 
 # ---------------------------------------------------------------------------
+# Unity's program header in front of the container
+# ---------------------------------------------------------------------------
+#
+# This is what made the translator reject every shader in every real bundle:
+# a D3D11 sub-program is not a bare DXBC container, Unity writes its own
+# binding header first. The container has to be found, not assumed to be at
+# offset zero.
+
+prefixed = dx_prefixed = m.unity_program([
+    globals_cbuffer([variable("_Color", 0, 16, VECTOR4)], 16),
+    m.signature_chunk([{"name": "TEXCOORD", "index": 0, "register": 0}], b"ISGN"),
+    m.signature_chunk([{"name": "SV_Target", "index": 0, "register": 0, "rw_mask": 0}], b"OSGN"),
+    m.shex_chunk([m.insn(MOV, m.dest(OUTPUT, 0), m.src_cb(0, 0)) + m.insn(RET)], stage=0),
+])
+proc, fields, _, source = run("glsl", prefixed)
+check("a container behind Unity's header still translates", fields.get("ok") == "1",
+      fields.get("error", ""))
+check("the translated body is the real one", "SV_Target0.xyzw = _Color.xyzw;" in source, source)
+
+proc, fields, _, _ = run("parse", prefixed)
+check("the container offset is reported", fields.get("containerOffset") == "24",
+      fields.get("containerOffset", "<missing>"))
+
+# A longer prefix still resolves, and one past the scan window does not -- an
+# unbounded search would eventually match four bytes of bytecode.
+proc, fields, _, _ = run("glsl", m.unity_program([
+    m.shex_chunk([m.insn(RET)], stage=0)], prefix=b"\x00" * 512))
+check("a long prefix is still found", fields.get("ok") == "1", fields.get("error", ""))
+
+proc, fields, _, _ = run("glsl", m.unity_program([
+    m.shex_chunk([m.insn(RET)], stage=0)], prefix=b"\x00" * 4096))
+check("a prefix past the scan window is refused", fields.get("ok") == "0", "")
+
+# The refusal has to say what the bytes were, or every shader in every map
+# reports the same sentence and there is nothing to work from.
+proc, fields, _, _ = run("glsl", b"\x01\x02\x03\x04" * 8)
+check("a non-container names its byte count", "32 program byte(s)" in fields.get("error", ""),
+      fields.get("error", ""))
+check("a non-container dumps its prefix", "01 02 03 04" in fields.get("error", ""),
+      fields.get("error", ""))
+
+# ---------------------------------------------------------------------------
 # Malformed input
 # ---------------------------------------------------------------------------
 

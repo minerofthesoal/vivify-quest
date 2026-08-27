@@ -28,7 +28,11 @@ namespace {
 //
 //   1  retarget only (every build up to 0.9.6)
 //   2  retarget plus DirectX -> GLSL ES shader translation
-constexpr int kBundleConversionVersion = 2;
+//   3  the same, but actually finding the DXBC: version 2 looked for the
+//      container at offset zero, where Unity's own program header sits, so it
+//      translated nothing at all and its caches are worth no more than a
+//      version 1 one
+constexpr int kBundleConversionVersion = 3;
 
 std::string ConversionMarkerPath(std::string const& destPath) {
   return destPath + ".version";
@@ -53,6 +57,26 @@ void MarkConversionCurrent(std::string const& destPath) {
     return;
   }
   marker << kBundleConversionVersion << "\n";
+}
+
+// True for a shader whose job is to cover the view rather than to shade a
+// surface: a full-screen blit, a skybox, a stencil mask, a fog volume.
+//
+// The distinction matters only when nothing of the original look can be carried
+// across. A stand-in on a piece of scenery is a worse-looking mesh; a stand-in
+// on one of these is an opaque quad between the player and everything else.
+bool IsScreenSpaceEffectShader(std::string_view shaderName) {
+  std::string lowered(shaderName);
+  std::transform(lowered.begin(), lowered.end(), lowered.begin(),
+                 [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+  static constexpr std::string_view screenEffects[] = {
+      "blit"sv, "skybox"sv, "stencil"sv, "mask"sv, "fog"sv, "postpro"sv, "screen"sv,
+      "shadowcaster"sv, "depthonly"sv, "cleardepth"sv, "vignette"sv, "bokeh"sv,
+  };
+  for (auto effect : screenEffects) {
+    if (lowered.find(effect) != std::string_view::npos) return true;
+  }
+  return false;
 }
 
 // Runs whichever conversion the settings ask for and flattens the two result
@@ -1493,6 +1517,24 @@ void Runtime::RepairMaterialShader(UnityEngine::Material* material, std::string_
     _shaderRepairFailed++;
     PaperLogger.warn("Vivify shader stand-in declined: material '{}' (shader '{}') -- "
                      "stand-in shading is turned off in settings",
+                     ToStdString(material->get_name()), originalShaderName);
+    _repairedMaterials.emplace(material);
+    return;
+  }
+  if (usingGenericStandIn && !canCarryLook && IsScreenSpaceEffectShader(originalShaderName)) {
+    // A grey stand-in is right for a mesh and wrong for a screen effect.
+    //
+    // A blit, a skybox, a stencil mask and a fog volume are all geometry that
+    // covers the view: their own shader is what makes them subtle or invisible,
+    // and none of that survives the substitution. Painting them opaque grey
+    // does not approximate the effect, it hangs a wall in front of the map --
+    // which is what a converted level looked like even after two hundred
+    // materials were "repaired". These are left undrawn instead, which is what
+    // they would have been before the stand-in existed.
+    _shaderRepairFailed++;
+    PaperLogger.warn("Vivify shader stand-in declined: material '{}' (shader '{}') is a screen or "
+                     "masking effect, and a stand-in for one covers the view instead of "
+                     "approximating it",
                      ToStdString(material->get_name()), originalShaderName);
     _repairedMaterials.emplace(material);
     return;

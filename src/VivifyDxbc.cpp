@@ -283,16 +283,79 @@ std::string OpcodeName(uint32_t opcode) {
   return entry.name;
 }
 
-bool LooksLikeDxbc(uint8_t const* data, size_t size) {
-  if (data == nullptr || size < 32) return false;
+namespace {
+
+// True when a well-formed DXBC container header starts exactly at `offset`.
+//
+// The magic alone is four bytes that can occur by chance inside bytecode, so
+// the rest of the header has to agree with it: the format's constant 1, a total
+// size that fits in what remains, and a chunk count that fits in that size.
+bool ContainerHeaderAt(uint8_t const* data, size_t size, size_t offset) {
+  if (offset > size || size - offset < 32) return false;
+  uint8_t const* header = data + offset;
   uint32_t magic = 0;
-  std::memcpy(&magic, data, 4);
+  std::memcpy(&magic, header, 4);
   if (magic != kFourCCDxbc) return false;
+  uint32_t one = 0;
   uint32_t totalSize = 0;
-  std::memcpy(&totalSize, data + 24, 4);
-  // Unity stores the container with nothing after it, but a blob that claims to
-  // be longer than the buffer it sits in is the corruption case this rejects.
-  return totalSize <= size;
+  uint32_t chunkCount = 0;
+  std::memcpy(&one, header + 20, 4);
+  std::memcpy(&totalSize, header + 24, 4);
+  std::memcpy(&chunkCount, header + 28, 4);
+  if (one != 1) return false;
+  if (totalSize < 32 || totalSize > size - offset) return false;
+  // Every chunk needs a 4-byte offset entry in the table and an 8-byte header
+  // of its own.
+  if (chunkCount == 0 || chunkCount > (totalSize - 32) / 12) return false;
+  return true;
+}
+
+// Finds the DXBC container inside one Unity shader program.
+//
+// A D3D11 sub-program is not a bare DXBC container. Unity writes its own
+// header first -- the binding tables its runtime needs to map constant buffers
+// and textures onto the bytecode -- and the container follows it. Requiring the
+// magic at offset zero is what made this translator reject every shader in
+// every bundle with "not a DXBC container" before decoding a single
+// instruction, so the container is located by its header rather than assumed.
+//
+// The scan is bounded: Unity's prefix is tens of bytes, and searching the whole
+// program would eventually match four bytes of bytecode that happen to spell
+// the magic.
+constexpr size_t kMaxContainerPrefix = 1024;
+constexpr size_t kNoContainer = static_cast<size_t>(-1);
+
+size_t FindContainerOffset(uint8_t const* data, size_t size) {
+  if (data == nullptr || size < 32) return kNoContainer;
+  size_t const last = std::min(kMaxContainerPrefix, size - 32);
+  for (size_t offset = 0; offset <= last; offset++) {
+    if (ContainerHeaderAt(data, size, offset)) return offset;
+  }
+  return kNoContainer;
+}
+
+// A short hex dump of a program's first bytes.
+//
+// When no container is found, this is the only thing that says what the bytes
+// actually are. Without it the failure is "not a DXBC container" for every
+// shader in every map and there is nothing to work from.
+std::string DescribePrefix(uint8_t const* data, size_t size) {
+  static char const digits[] = "0123456789abcdef";
+  std::string text;
+  size_t const shown = std::min<size_t>(size, 24);
+  for (size_t i = 0; i < shown; i++) {
+    if (i != 0) text += ' ';
+    text += digits[(data[i] >> 4) & 0xf];
+    text += digits[data[i] & 0xf];
+  }
+  if (size > shown) text += " ...";
+  return text;
+}
+
+}  // namespace
+
+bool LooksLikeDxbc(uint8_t const* data, size_t size) {
+  return FindContainerOffset(data, size) != kNoContainer;
 }
 
 namespace {
@@ -701,10 +764,21 @@ bool DecodeInstructions(uint8_t const* code, size_t codeSize, Program& program) 
 
 Program ParseProgram(uint8_t const* data, size_t size) {
   Program program;
-  if (!LooksLikeDxbc(data, size)) {
-    program.error = "not a DXBC container";
+  size_t const containerOffset = FindContainerOffset(data, size);
+  if (containerOffset == kNoContainer) {
+    // The bytes are reported, because "not a DXBC container" on its own says
+    // nothing about what they are instead.
+    program.error = "no DXBC container in " + std::to_string(size) +
+                    " program byte(s), starting " +
+                    (data == nullptr || size == 0 ? std::string("(empty)")
+                                                  : DescribePrefix(data, size));
     return program;
   }
+  // Every offset inside the container -- the chunk table included -- is
+  // relative to the container, not to Unity's header in front of it.
+  data += containerOffset;
+  size -= containerOffset;
+  program.containerOffset = containerOffset;
 
   Reader reader(data, size);
   reader.Skip(4);   // magic
