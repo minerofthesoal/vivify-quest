@@ -155,7 +155,24 @@ bool EnsureBoolConfigValue(std::string_view key, bool defaultValue, bool& value)
   return true;
 }
 
+// True only while the settings view controller is being constructed.
+//
+// BSML toggles are live the moment they exist, and a toggle that fires its
+// change callback while it is still being set up writes that transient value
+// straight through to the config file -- which is how "Stand-In Shading" went
+// from on to off mid-session without anybody touching it, and with it every
+// converted map's geometry stopped being repaired. A player cannot tap a
+// control that is not on screen yet, so any change arriving in this window is
+// construction noise and is dropped.
+bool gSettingsMenuBuilding = false;
+
 void SetBoolConfigValue(std::string_view key, bool enabled, bool& value) {
+  if (gSettingsMenuBuilding) {
+    PaperLogger.info("Vivify settings: ignoring a '{}' change to {} that arrived while the menu was "
+                     "still being built",
+                     key, enabled ? "on" : "off");
+    return;
+  }
   auto& config = getConfig();
   auto& doc = config.config;
   EnsureConfigObject();
@@ -186,6 +203,11 @@ void RegisterModSettings() {
   BSML::BSMLSettings::get_instance()->TryAddSettingsMenu(
       [](HMUI::ViewController* viewController, bool firstActivation, bool, bool) {
         if (!firstActivation || viewController == nullptr) return;
+        gSettingsMenuBuilding = true;
+        // Cleared however this scope is left, including through the catch below.
+        struct BuildGuard {
+          ~BuildGuard() { gSettingsMenuBuilding = false; }
+        } buildGuard;
 
         // The whole menu is built inside a try/catch because it is built inside
         // a callback the game invokes: anything that throws here abandons the
