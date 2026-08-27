@@ -215,6 +215,9 @@ struct Program {
   Stage stage = Stage::Unknown;
   uint32_t majorVersion = 0;
   uint32_t minorVersion = 0;
+  // Where the DXBC container began inside the program bytes. Unity writes its
+  // own binding header in front of it, so this is normally not zero.
+  size_t containerOffset = 0;
 
   std::vector<SignatureElement> inputSignature;
   std::vector<SignatureElement> outputSignature;

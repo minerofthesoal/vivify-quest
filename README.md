@@ -590,7 +590,13 @@ exists today:
    `ConvertShadersToGles` is the whole thing end to end, and it is what the
    on-device conversion runs (settings: "Translate Shaders On Conversion").
 
-   Tested by `tools/dxbc/`: 121 checks under ASan/UBSan against hand-assembled
+   A D3D11 sub-program is *not* a bare DXBC container: Unity writes its own
+   binding header in front of the bytecode, so the container is located by its
+   header rather than assumed to be at offset zero. Getting that wrong made the
+   first version of this reject every shader in every bundle before decoding a
+   single instruction, and it is why the fixtures carry the prefix too.
+
+   Tested by `tools/dxbc/`: 128 checks under ASan/UBSan against hand-assembled
    containers, plus five end-to-end cases in `tools/bundleconvert/`. There is
    no DirectX compiler on a Linux host and no Quest here, so the fixtures are
    written from the format documentation rather than captured from fxc. That

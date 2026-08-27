@@ -1206,7 +1206,7 @@ ShaderConversion ConvertShadersToGles(std::string const& sourcePath,
         conversion.shadersRefused++;
         if (conversion.refusals.size() < kMaxLoggedRefusals) {
           conversion.refusals.push_back(
-              (shader.name.empty() ? std::string("<unnamed>") : shader.name) + ": " +
+              (shader.name.empty() ? ("shader@" + std::to_string(shader.pathID)) : shader.name) + ": " +
               (decoded.message.empty() ? "no programs decoded" : decoded.message));
         }
         continue;
@@ -1218,7 +1218,7 @@ ShaderConversion ConvertShadersToGles(std::string const& sourcePath,
         conversion.shadersRefused++;
         if (conversion.refusals.size() < kMaxLoggedRefusals) {
           conversion.refusals.push_back(
-              (shader.name.empty() ? std::string("<unnamed>") : shader.name) + ": " + reason);
+              (shader.name.empty() ? ("shader@" + std::to_string(shader.pathID)) : shader.name) + ": " + reason);
         }
         continue;
       }
@@ -1232,7 +1232,7 @@ ShaderConversion ConvertShadersToGles(std::string const& sourcePath,
         conversion.shadersRefused++;
         if (conversion.refusals.size() < kMaxLoggedRefusals) {
           conversion.refusals.push_back(
-              (shader.name.empty() ? std::string("<unnamed>") : shader.name) + ": " +
+              (shader.name.empty() ? ("shader@" + std::to_string(shader.pathID)) : shader.name) + ": " +
               rebuilt.message);
         }
         continue;

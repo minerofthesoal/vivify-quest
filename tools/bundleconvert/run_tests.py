@@ -244,7 +244,10 @@ def dxbc_vertex():
     code += dx.insn(ADD, dx.dest(dx.OPERAND_OUTPUT, 0), dx.src(dx.OPERAND_TEMP, 0),
                     dx.src_cb(0, 1))
     code += dx.insn(RET)
-    return dx.container([rdef, isgn, osgn, dx.shex_chunk([code], stage=1)])
+    # unity_program, not container: a D3D11 sub-program in a real bundle carries
+    # Unity's binding header in front of the DXBC, and a fixture without one
+    # tests a shape that never occurs.
+    return dx.unity_program([rdef, isgn, osgn, dx.shex_chunk([code], stage=1)])
 
 
 def dxbc_untranslatable():
@@ -260,7 +263,7 @@ def dxbc_untranslatable():
     code += dx.insn(MSAD, dx.dest(dx.OPERAND_TEMP, 0), dx.src(dx.OPERAND_TEMP, 0),
                     dx.src(dx.OPERAND_TEMP, 0), dx.src(dx.OPERAND_TEMP, 0))
     code += dx.insn(RET)
-    return dx.container([isgn, osgn, dx.shex_chunk([code], stage=1)])
+    return dx.unity_program([isgn, osgn, dx.shex_chunk([code], stage=1)])
 
 
 def shader_bundle(path, shaders, sf_version=21, target=19):

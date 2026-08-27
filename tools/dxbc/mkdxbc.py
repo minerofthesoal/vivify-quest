@@ -298,6 +298,19 @@ def rdef_chunk(constant_buffers=(), bindings=(), creator="vivify-quest test", ma
     return (b"RDEF", body)
 
 
+def unity_program(chunks, prefix=None):
+    """A DXBC container behind a Unity-style program header.
+
+    A D3D11 sub-program in a Unity shader blob is not a bare container: Unity
+    writes its own binding header first and the container follows it. Requiring
+    the magic at offset zero rejected every shader in every real bundle, so the
+    fixtures cover the prefixed form as well as the bare one."""
+    if prefix is None:
+        # Shaped like Unity's: a few counts and offsets, no DXBC magic in it.
+        prefix = struct.pack("<IIIIII", 1, 0, 2, 0x30, 0, 0)
+    return prefix + container(chunks)
+
+
 def container(chunks):
     """chunks: a list of (fourcc, body) pairs."""
     header_size = 32 + len(chunks) * 4
