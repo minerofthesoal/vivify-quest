@@ -1352,11 +1352,47 @@ UnityEngine::Shader* Runtime::FindFallbackShader() {
   // is most map geometry) reads whatever the driver leaves in that register,
   // and on the Quest's GLES driver that is zero. Black geometry, blended over
   // a black frame. Neither shader belongs anywhere near a mesh.
+  // An explicit choice wins over every heuristic below.
+  //
+  // Which shader stands in acceptably depends on what a given Beat Saber build
+  // ships and how the map lights its scene, and neither is knowable from
+  // anywhere but a headset. Rather than another round of guessing, a name from
+  // the shader index this logs at level start can be put in
+  // standInShaderName in the mod's config and tried at once.
+  std::string const requested = GetStandInShaderName();
+  if (!requested.empty()) {
+    auto* chosen = resolveByName(requested);
+    if (chosen != nullptr) {
+      _fallbackShader = chosen;
+      PaperLogger.info("Vivify fallback shader: using '{}', named by the standInShaderName setting",
+                       ShaderNameForLog(chosen));
+      return _fallbackShader;
+    }
+    PaperLogger.warn("Vivify fallback shader: the standInShaderName setting asks for '{}', which is "
+                     "not among the runnable shaders on this device; choosing automatically instead",
+                     requested);
+  }
+
+  // Unlit first, lit last, and that order is the whole point.
+  //
+  // A Vivify map replaces the environment, and the environment is where Beat
+  // Saber's lights live. A lit shader in a scene with no lights returns black
+  // no matter what colour or texture is fed to it -- which is what a converted
+  // level looked like for several builds while Custom/SimpleLit, a lit shader,
+  // sat at the top of this list. The giveaway was that particles still showed:
+  // particle materials are unlit and additive, so they were the only things a
+  // missing light source could not switch off.
+  //
+  // The scored scan below has always ranked "unlit" above "simplelit"; this
+  // list was overriding it before the scan ever ran.
   static constexpr std::string_view preferredNames[] = {
-      "Custom/SimpleLit"sv,     "Custom/Glowing"sv,       "Custom/GlowingInstancedHD"sv,
-      "Custom/OpaqueNeonLight"sv, "Custom/UnlitGlow"sv,   "BeatSaber/Unlit Glow"sv,
-      "Unlit/Texture"sv,        "Unlit/Color"sv,          "Standard"sv,
-      "Mobile/Diffuse"sv,       "Legacy Shaders/Diffuse"sv,
+      "BeatSaber/Unlit Glow"sv,  "Custom/UnlitGlow"sv,     "Unlit/Texture"sv,
+      "Unlit/Color"sv,           "Custom/Glowing"sv,       "Custom/GlowingInstancedHD"sv,
+      "Custom/OpaqueNeonLight"sv,
+      // Everything past here needs a light to show anything at all, and is only
+      // reached when the device has none of the above.
+      "Custom/SimpleLit"sv,      "Standard"sv,             "Mobile/Diffuse"sv,
+      "Legacy Shaders/Diffuse"sv,
   };
   // A named 3D shader that cannot be tinted still beats a sprite shader, so a
   // colourless one is kept as a runner-up rather than discarded outright.
@@ -1366,8 +1402,10 @@ UnityEngine::Shader* Runtime::FindFallbackShader() {
     if (candidate == nullptr) continue;
     if (carriesColour(candidate)) {
       _fallbackShader = candidate;
-      PaperLogger.info("Vivify fallback shader: using '{}' (named candidate, tintable)",
-                       ShaderNameForLog(candidate));
+      PaperLogger.info("Vivify fallback shader: using '{}' (named candidate, tintable, "
+                       "mainTex={})",
+                       ShaderNameForLog(candidate),
+                       BoolText(candidate->FindPropertyIndex(StringW("_MainTex")) >= 0));
       return _fallbackShader;
     }
     if (colourlessRunnerUp == nullptr) colourlessRunnerUp = candidate;

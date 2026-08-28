@@ -36,6 +36,7 @@ constexpr std::string_view kConvertPcBundlesOnDeviceConfigKey = "convertPcBundle
 constexpr std::string_view kStandInShadingConfigKey = "standInShading";
 constexpr std::string_view kSubmitScoresConfigKey = "submitScoresOnVivifyMaps";
 constexpr std::string_view kTranslateShadersConfigKey = "translateShadersOnConversion";
+constexpr std::string_view kStandInShaderNameConfigKey = "standInShaderName";
 bool gMultipassRenderingEnabled = true;
 bool gVivifyDebugLogging = false;
 bool gDisableBeat0FilmgrainBlit = false;
@@ -75,6 +76,15 @@ bool gSubmitScores = true;
 // bundle turns out worse than an unshaded one -- no new build required, just
 // reconvert.
 bool gTranslateShaders = true;
+// Which shader to use as the stand-in, by name, overriding the automatic pick.
+//
+// Empty means "choose automatically". This exists because the right answer
+// depends on what a particular Beat Saber build actually ships, and that list
+// is only knowable from a headset: several builds shipped with a stand-in that
+// turned out to render black on the device. The session log prints every
+// runnable shader name, so a name from that list can be dropped in here and
+// tried immediately rather than waiting for another build.
+std::string gStandInShaderName;
 
 // Both diagnostic files live beside the mod's own data, and both are .txt.
 //
@@ -145,6 +155,29 @@ void EnsureConfigObject() {
   if (!doc.IsObject()) {
     doc.SetObject();
   }
+}
+
+// The string equivalent of EnsureBoolConfigValue, for settings whose value is a
+// name rather than a switch.
+bool EnsureStringConfigValue(std::string_view key, std::string const& defaultValue,
+                             std::string& value) {
+  auto& doc = getConfig().config;
+  auto it = doc.FindMember(key.data());
+  if (it != doc.MemberEnd() && it->value.IsString()) {
+    value.assign(it->value.GetString(), it->value.GetStringLength());
+    return false;
+  }
+
+  auto& allocator = doc.GetAllocator();
+  value = defaultValue;
+  rapidjson::Value stored(defaultValue.c_str(), static_cast<rapidjson::SizeType>(defaultValue.size()),
+                          allocator);
+  if (it == doc.MemberEnd()) {
+    doc.AddMember(rapidjson::Value(key.data(), allocator), stored, allocator);
+  } else {
+    it->value = stored;
+  }
+  return true;
 }
 
 bool EnsureBoolConfigValue(std::string_view key, bool defaultValue, bool& value) {
@@ -414,6 +447,10 @@ bool GetTranslateShadersOnConversion() {
   return gTranslateShaders;
 }
 
+std::string GetStandInShaderName() {
+  return gStandInShaderName;
+}
+
 void EnsureConfigDefaults() {
   auto& config = getConfig();
   auto& doc = config.config;
@@ -433,6 +470,8 @@ void EnsureConfigDefaults() {
   needsWrite |= EnsureBoolConfigValue(kStandInShadingConfigKey, true, gStandInShading);
   needsWrite |= EnsureBoolConfigValue(kSubmitScoresConfigKey, true, gSubmitScores);
   needsWrite |= EnsureBoolConfigValue(kTranslateShadersConfigKey, true, gTranslateShaders);
+  needsWrite |= EnsureStringConfigValue(kStandInShaderNameConfigKey, std::string(),
+                                        gStandInShaderName);
   if (needsWrite) {
     config.Write();
   }
