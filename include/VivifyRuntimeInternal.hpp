@@ -460,6 +460,9 @@ private:
   int _shaderRepairAttempts = 0;
   int _shaderRepairSucceeded = 0;
   int _shaderRepairFailed = 0;
+  // Counted apart from the failures: these are meant to be undrawn, and folding
+  // them into "could not be repaired" hid a rule that was deleting scenery.
+  int _screenEffectsDeclined = 0;
 
   int _downloadGeneration = 0;
   float _downloadDeadline = -1.0f;

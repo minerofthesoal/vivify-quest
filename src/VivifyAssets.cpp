@@ -69,9 +69,17 @@ bool IsScreenSpaceEffectShader(std::string_view shaderName) {
   std::string lowered(shaderName);
   std::transform(lowered.begin(), lowered.end(), lowered.begin(),
                  [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+  // Every word here has to name the shader's *job*, not merely appear in its
+  // name, because a false positive deletes real scenery.
+  //
+  // "fog" was on this list and matched Swifter/SimpleTerrainFog -- the shader
+  // 743Aether puts on its terrain -- so the ground, the spikes and the terrain
+  // notes were all silently dropped and the map rendered as a few white shapes
+  // over black. "screen" and "mask" were the same kind of mistake waiting to
+  // happen; a real stencil mask is caught by "stencil" without them.
   static constexpr std::string_view screenEffects[] = {
-      "blit"sv, "skybox"sv, "stencil"sv, "mask"sv, "fog"sv, "postpro"sv, "screen"sv,
-      "shadowcaster"sv, "depthonly"sv, "cleardepth"sv, "vignette"sv, "bokeh"sv,
+      "blit"sv, "skybox"sv, "stencil"sv, "postpro"sv, "bokeh"sv,
+      "shadowcaster"sv, "depthonly"sv, "cleardepth"sv, "vignette"sv,
   };
   for (auto effect : screenEffects) {
     if (lowered.find(effect) != std::string_view::npos) return true;
@@ -1570,6 +1578,7 @@ void Runtime::RepairMaterialShader(UnityEngine::Material* material, std::string_
     // materials were "repaired". These are left undrawn instead, which is what
     // they would have been before the stand-in existed.
     _shaderRepairFailed++;
+    _screenEffectsDeclined++;
     PaperLogger.warn("Vivify shader stand-in declined: material '{}' (shader '{}') is a screen or "
                      "masking effect, and a stand-in for one covers the view instead of "
                      "approximating it",
@@ -1810,6 +1819,7 @@ void Runtime::RepairLoadedMaterialShaders() {
   _shaderRepairAttempts = 0;
   _shaderRepairSucceeded = 0;
   _shaderRepairFailed = 0;
+  _screenEffectsDeclined = 0;
   for (auto const& [path, asset] : _assets) {
     if (!IsAlive(asset)) continue;
     if (auto* material = il2cpp_utils::try_cast<UnityEngine::Material>(asset).value_or(nullptr); IsAlive(material)) {
@@ -1822,7 +1832,9 @@ void Runtime::RepairLoadedMaterialShaders() {
     // Worth logging unconditionally: a bundle whose shaders all had to be
     // replaced is a converted PC bundle rendering with stand-in shading, and a
     // non-zero failure count means some of it will not draw at all.
-    PaperLogger.info("Vivify shader repair: {} material(s) had an unusable shader, {} replaced, {} could not be",
+    PaperLogger.info("Vivify shader repair: {} screen/masking effect(s) left undrawn on purpose",
+                   _screenEffectsDeclined);
+  PaperLogger.info("Vivify shader repair: {} material(s) had an unusable shader, {} replaced, {} could not be",
                      _shaderRepairAttempts, _shaderRepairSucceeded, _shaderRepairFailed);
   }
 }
