@@ -69,9 +69,17 @@ bool IsScreenSpaceEffectShader(std::string_view shaderName) {
   std::string lowered(shaderName);
   std::transform(lowered.begin(), lowered.end(), lowered.begin(),
                  [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+  // Every word here has to name the shader's *job*, not merely appear in its
+  // name, because a false positive deletes real scenery.
+  //
+  // "fog" was on this list and matched Swifter/SimpleTerrainFog -- the shader
+  // 743Aether puts on its terrain -- so the ground, the spikes and the terrain
+  // notes were all silently dropped and the map rendered as a few white shapes
+  // over black. "screen" and "mask" were the same kind of mistake waiting to
+  // happen; a real stencil mask is caught by "stencil" without them.
   static constexpr std::string_view screenEffects[] = {
-      "blit"sv, "skybox"sv, "stencil"sv, "mask"sv, "fog"sv, "postpro"sv, "screen"sv,
-      "shadowcaster"sv, "depthonly"sv, "cleardepth"sv, "vignette"sv, "bokeh"sv,
+      "blit"sv, "skybox"sv, "stencil"sv, "postpro"sv, "bokeh"sv,
+      "shadowcaster"sv, "depthonly"sv, "cleardepth"sv, "vignette"sv,
   };
   for (auto effect : screenEffects) {
     if (lowered.find(effect) != std::string_view::npos) return true;
@@ -1352,11 +1360,47 @@ UnityEngine::Shader* Runtime::FindFallbackShader() {
   // is most map geometry) reads whatever the driver leaves in that register,
   // and on the Quest's GLES driver that is zero. Black geometry, blended over
   // a black frame. Neither shader belongs anywhere near a mesh.
+  // An explicit choice wins over every heuristic below.
+  //
+  // Which shader stands in acceptably depends on what a given Beat Saber build
+  // ships and how the map lights its scene, and neither is knowable from
+  // anywhere but a headset. Rather than another round of guessing, a name from
+  // the shader index this logs at level start can be put in
+  // standInShaderName in the mod's config and tried at once.
+  std::string const requested = GetStandInShaderName();
+  if (!requested.empty()) {
+    auto* chosen = resolveByName(requested);
+    if (chosen != nullptr) {
+      _fallbackShader = chosen;
+      PaperLogger.info("Vivify fallback shader: using '{}', named by the standInShaderName setting",
+                       ShaderNameForLog(chosen));
+      return _fallbackShader;
+    }
+    PaperLogger.warn("Vivify fallback shader: the standInShaderName setting asks for '{}', which is "
+                     "not among the runnable shaders on this device; choosing automatically instead",
+                     requested);
+  }
+
+  // Unlit first, lit last, and that order is the whole point.
+  //
+  // A Vivify map replaces the environment, and the environment is where Beat
+  // Saber's lights live. A lit shader in a scene with no lights returns black
+  // no matter what colour or texture is fed to it -- which is what a converted
+  // level looked like for several builds while Custom/SimpleLit, a lit shader,
+  // sat at the top of this list. The giveaway was that particles still showed:
+  // particle materials are unlit and additive, so they were the only things a
+  // missing light source could not switch off.
+  //
+  // The scored scan below has always ranked "unlit" above "simplelit"; this
+  // list was overriding it before the scan ever ran.
   static constexpr std::string_view preferredNames[] = {
-      "Custom/SimpleLit"sv,     "Custom/Glowing"sv,       "Custom/GlowingInstancedHD"sv,
-      "Custom/OpaqueNeonLight"sv, "Custom/UnlitGlow"sv,   "BeatSaber/Unlit Glow"sv,
-      "Unlit/Texture"sv,        "Unlit/Color"sv,          "Standard"sv,
-      "Mobile/Diffuse"sv,       "Legacy Shaders/Diffuse"sv,
+      "BeatSaber/Unlit Glow"sv,  "Custom/UnlitGlow"sv,     "Unlit/Texture"sv,
+      "Unlit/Color"sv,           "Custom/Glowing"sv,       "Custom/GlowingInstancedHD"sv,
+      "Custom/OpaqueNeonLight"sv,
+      // Everything past here needs a light to show anything at all, and is only
+      // reached when the device has none of the above.
+      "Custom/SimpleLit"sv,      "Standard"sv,             "Mobile/Diffuse"sv,
+      "Legacy Shaders/Diffuse"sv,
   };
   // A named 3D shader that cannot be tinted still beats a sprite shader, so a
   // colourless one is kept as a runner-up rather than discarded outright.
@@ -1366,8 +1410,10 @@ UnityEngine::Shader* Runtime::FindFallbackShader() {
     if (candidate == nullptr) continue;
     if (carriesColour(candidate)) {
       _fallbackShader = candidate;
-      PaperLogger.info("Vivify fallback shader: using '{}' (named candidate, tintable)",
-                       ShaderNameForLog(candidate));
+      PaperLogger.info("Vivify fallback shader: using '{}' (named candidate, tintable, "
+                       "mainTex={})",
+                       ShaderNameForLog(candidate),
+                       BoolText(candidate->FindPropertyIndex(StringW("_MainTex")) >= 0));
       return _fallbackShader;
     }
     if (colourlessRunnerUp == nullptr) colourlessRunnerUp = candidate;
@@ -1532,6 +1578,7 @@ void Runtime::RepairMaterialShader(UnityEngine::Material* material, std::string_
     // materials were "repaired". These are left undrawn instead, which is what
     // they would have been before the stand-in existed.
     _shaderRepairFailed++;
+    _screenEffectsDeclined++;
     PaperLogger.warn("Vivify shader stand-in declined: material '{}' (shader '{}') is a screen or "
                      "masking effect, and a stand-in for one covers the view instead of "
                      "approximating it",
@@ -1772,6 +1819,7 @@ void Runtime::RepairLoadedMaterialShaders() {
   _shaderRepairAttempts = 0;
   _shaderRepairSucceeded = 0;
   _shaderRepairFailed = 0;
+  _screenEffectsDeclined = 0;
   for (auto const& [path, asset] : _assets) {
     if (!IsAlive(asset)) continue;
     if (auto* material = il2cpp_utils::try_cast<UnityEngine::Material>(asset).value_or(nullptr); IsAlive(material)) {
@@ -1784,7 +1832,9 @@ void Runtime::RepairLoadedMaterialShaders() {
     // Worth logging unconditionally: a bundle whose shaders all had to be
     // replaced is a converted PC bundle rendering with stand-in shading, and a
     // non-zero failure count means some of it will not draw at all.
-    PaperLogger.info("Vivify shader repair: {} material(s) had an unusable shader, {} replaced, {} could not be",
+    PaperLogger.info("Vivify shader repair: {} screen/masking effect(s) left undrawn on purpose",
+                   _screenEffectsDeclined);
+  PaperLogger.info("Vivify shader repair: {} material(s) had an unusable shader, {} replaced, {} could not be",
                      _shaderRepairAttempts, _shaderRepairSucceeded, _shaderRepairFailed);
   }
 }
