@@ -1765,6 +1765,7 @@ UnityEngine::Texture* Runtime::ResolveUsableTexture(UnityEngine::Texture* textur
 void Runtime::DecodeUnsupportedBundleTextures() {
   int swapped = 0;
   int skipped = 0;
+  _texturesScannedMaterials.clear();
 
   // Block-compressed decoding is real CPU work on the main thread: a 2048x2048
   // BC7 texture is four million pixels, and a bundle can hold dozens. Left
@@ -1772,17 +1773,25 @@ void Runtime::DecodeUnsupportedBundleTextures() {
   // indistinguishable from a freeze. Decode what fits in the budget, skip the
   // rest, and say how many were skipped -- a few untextured materials beat a
   // hung game.
-  constexpr double kDecodeBudgetMs = 2000.0;
+  // Raised from two seconds along with the prefab walk above. That walk finds
+  // the materials that carry most of a map's textures, so the old budget --
+  // sized for the handful of standalone Material assets -- would now be spent
+  // long before the scene geometry was reached, and a skipped texture is a
+  // black one. A converted map already pays seconds for the conversion itself;
+  // several more on first load beat a level that cannot be seen.
+  constexpr double kDecodeBudgetMs = 8000.0;
   auto const start = std::chrono::steady_clock::now();
   auto elapsedMs = [&start]() {
     return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
   };
 
-  for (auto const& [path, asset] : _assets) {
-    auto* material = il2cpp_utils::try_cast<UnityEngine::Material>(asset).value_or(nullptr);
-    if (!IsAlive(material)) continue;
+  auto decodeMaterial = [&](UnityEngine::Material* material) {
+    if (!IsAlive(material)) return;
+    // A material reached through several renderers is the same material; doing
+    // it twice would only spend budget.
+    if (!_texturesScannedMaterials.emplace(material).second) return;
     auto names = material->GetPropertyNames(UnityEngine::MaterialPropertyType::Texture);
-    if (!names) continue;
+    if (!names) return;
     for (auto name : names) {
       if (!name) continue;
       auto* current = material->GetTexture(name).unsafePtr();
@@ -1799,14 +1808,49 @@ void Runtime::DecodeUnsupportedBundleTextures() {
         swapped++;
       }
     }
+  };
+
+  // The same two kinds of asset the shader repair walks, and for the same
+  // reason.
+  //
+  // This used to consider only Material assets. Nearly every material in a
+  // Vivify map is not one: it hangs off a renderer inside a prefab
+  // (assets/.../prefabs/scene1.prefab and friends), which is exactly why
+  // RepairLoadedMaterialShaders walks GameObjects as well. So scene geometry
+  // had its shader repaired and its textures left as DirectX block-compressed
+  // data that an Adreno cannot sample -- which reads as black. A material with
+  // no texture at all was unaffected and drew as a flat pale shape, so the
+  // symptom was a black level with a few white objects and the particles still
+  // showing.
+  for (auto const& [path, asset] : _assets) {
+    if (!IsAlive(asset)) continue;
+    if (auto* material = il2cpp_utils::try_cast<UnityEngine::Material>(asset).value_or(nullptr);
+        IsAlive(material)) {
+      decodeMaterial(material);
+      continue;
+    }
+    auto* gameObject = il2cpp_utils::try_cast<UnityEngine::GameObject>(asset).value_or(nullptr);
+    if (!IsAlive(gameObject)) continue;
+    auto renderers = gameObject->GetComponentsInChildren<UnityEngine::Renderer*>(true);
+    for (int i = 0; i < renderers.size(); i++) {
+      auto* renderer = renderers[i];
+      if (!IsAlive(renderer)) continue;
+      auto materials = renderer->get_sharedMaterials();
+      if (!materials) continue;
+      for (int j = 0; j < materials.size(); j++) {
+        decodeMaterial(materials[j].unsafePtr());
+      }
+    }
   }
   _texturesDecoded = swapped;
   _texturesSkipped = skipped;
-  if (swapped > 0 || skipped > 0) {
-    PaperLogger.info(
-        "Vivify texture decode: replaced {} unsupported texture reference(s) in {:.0f}ms, skipped {} over budget",
-        swapped, elapsedMs(), skipped);
-  }
+  // Logged even when nothing was found, and that is the point: this pass
+  // printing nothing at all is how it went unnoticed that it was looking in the
+  // wrong place. "scanned 0" is a symptom; silence is not.
+  PaperLogger.info(
+      "Vivify texture decode: scanned {} material(s), replaced {} unsupported texture "
+      "reference(s) in {:.0f}ms, skipped {} over budget",
+      _texturesScannedMaterials.size(), swapped, elapsedMs(), skipped);
   if (skipped > 0) {
     PaperLogger.warn(
         "Vivify stopped decoding textures after {:.0f}ms and left {} reference(s) on their original, "
