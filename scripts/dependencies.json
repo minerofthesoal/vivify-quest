@@ -22,15 +22,7 @@
         "cppFlags": [
           "-Wno-extra-qualification"
         ]
-      },
-      "submodules": [
-        {
-          "path": "shared/rapidjson",
-          "repo": "Tencent/rapidjson",
-          "ref": "5ec44fb9206695e5293f610b0a46d21851d0c966",
-          "_note": "gitlink pinned by beatsaber-hook version/v6_4_2; shared/config/rapidjson-utils.hpp includes ../rapidjson/include/rapidjson/rapidjson.h"
-        }
-      ]
+      }
     },
     {
       "id": "bs-cordl",
@@ -78,7 +70,8 @@
       "repo": "darknight1050/config-utils",
       "ref": "version/v2_0_3",
       "headersOnly": true,
-      "_note": "headers-only: qpm resolves this with headersOnly=true and links no library. Its release carries libconfig-utils_test.so -- the repo's TEST binary, which is what overrideSoName names in qpm.shared.json. Downloading and linking it put DT_NEEDED[libconfig-utils_test.so] into libVivify.so; no Quest has that file, so dlopen failed and the mod would not load at all."
+      "soLink": "https://github.com/darknight1050/config-utils/releases/download/v2.0.3/libconfig-utils_test.so",
+      "overrideSoName": "libconfig-utils_test.so"
     },
     {
       "id": "cpp-semver",
@@ -128,7 +121,7 @@
       "headersOnly": true,
       "compileOptions": {
         "systemIncludes": [
-          "include"
+          "fmt/include/"
         ],
         "cppFlags": [
           "-DFMT_HEADER_ONLY"
@@ -142,9 +135,9 @@
       "headersOnly": true,
       "compileOptions": {
         "systemIncludes": [
-          "libil2cpp",
-          "external/baselib/Include",
-          "external/baselib/Platforms/Android/Include"
+          "libil2cpp/libil2cpp",
+          "libil2cpp/external/baselib/Include",
+          "libil2cpp/external/baselib/Platforms/Android/Include"
         ]
       }
     },
@@ -167,20 +160,12 @@
       "soLink": "https://github.com/Fernthedev/paperlog/releases/download/v4.7.0/libpaper2_scotland2.so",
       "modLink": "https://github.com/Fernthedev/paperlog/releases/download/v4.7.0/paper2_scotland2.qmod",
       "overrideSoName": "libpaper2_scotland2.so",
-      "cmake": false,
-      "submodules": [
-        {
-          "path": "shared/utfcpp",
-          "repo": "nemtrif/utfcpp",
-          "ref": "6be08bbea14ffa0a5c594257fb6285a054395cd7",
-          "_note": "gitlink pinned by paperlog version/v4_7_0; shared/string_convert.hpp includes <utf8/cpp11.h>"
-        }
-      ],
       "compileOptions": {
         "systemIncludes": [
           "shared/utfcpp/source"
         ]
-      }
+      },
+      "cmake": false
     },
     {
       "id": "rapidjson-macros",

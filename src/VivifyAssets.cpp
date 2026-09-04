@@ -1,127 +1,15 @@
 #include "VivifyRuntimeInternal.hpp"
 #include "VivifyComponents.hpp"
 #include "VivifyBundleConvert.hpp"
-#include "VivifyTextureDecode.hpp"
-#include "VivifyReport.hpp"
-#include "UnityEngine/Texture2D.hpp"
-#include "UnityEngine/TextureFormat.hpp"
 #include <atomic>
-#include <chrono>
 #include <cstdio>
 #include <cstring>
-#include <fstream>
 #include <thread>
 #include <vector>
 
 namespace Vivify {
 
 namespace {
-
-// What conversion produces for a given input. Bumped whenever the converter
-// starts writing a different bundle from the same source.
-//
-// A converted bundle is cached on the headset and reused forever, keyed on the
-// source file. Without this, the shader-translating conversion would never run
-// for any map already converted by an earlier build: the cache would answer
-// first, with a bundle whose shaders are still DirectX, and the fix would look
-// like it had done nothing until someone found the reconvert button.
-//
-//   1  retarget only (every build up to 0.9.6)
-//   2  retarget plus DirectX -> GLSL ES shader translation
-//   3  the same, but actually finding the DXBC: version 2 looked for the
-//      container at offset zero, where Unity's own program header sits, so it
-//      translated nothing at all and its caches are worth no more than a
-//      version 1 one
-constexpr int kBundleConversionVersion = 3;
-
-std::string ConversionMarkerPath(std::string const& destPath) {
-  return destPath + ".version";
-}
-
-// A cached conversion counts only if it was produced by this converter. A
-// bundle with no marker beside it came from a build that predates them.
-bool CachedConversionIsCurrent(std::string const& destPath) {
-  std::error_code ec;
-  if (!std::filesystem::exists(destPath, ec) || ec) return false;
-  std::ifstream marker(ConversionMarkerPath(destPath));
-  int version = 0;
-  if (!(marker >> version)) return false;
-  return version == kBundleConversionVersion;
-}
-
-void MarkConversionCurrent(std::string const& destPath) {
-  std::ofstream marker(ConversionMarkerPath(destPath), std::ios::out | std::ios::trunc);
-  if (!marker) {
-    PaperLogger.warn("Vivify could not record the converter version beside '{}'; the bundle will "
-                     "be reconverted every launch", destPath);
-    return;
-  }
-  marker << kBundleConversionVersion << "\n";
-}
-
-// True for a shader whose job is to cover the view rather than to shade a
-// surface: a full-screen blit, a skybox, a stencil mask, a fog volume.
-//
-// The distinction matters only when nothing of the original look can be carried
-// across. A stand-in on a piece of scenery is a worse-looking mesh; a stand-in
-// on one of these is an opaque quad between the player and everything else.
-bool IsScreenSpaceEffectShader(std::string_view shaderName) {
-  std::string lowered(shaderName);
-  std::transform(lowered.begin(), lowered.end(), lowered.begin(),
-                 [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-  // Every word here has to name the shader's *job*, not merely appear in its
-  // name, because a false positive deletes real scenery.
-  //
-  // "fog" was on this list and matched Swifter/SimpleTerrainFog -- the shader
-  // 743Aether puts on its terrain -- so the ground, the spikes and the terrain
-  // notes were all silently dropped and the map rendered as a few white shapes
-  // over black. "screen" and "mask" were the same kind of mistake waiting to
-  // happen; a real stencil mask is caught by "stencil" without them.
-  static constexpr std::string_view screenEffects[] = {
-      "blit"sv, "skybox"sv, "stencil"sv, "postpro"sv, "bokeh"sv,
-      "shadowcaster"sv, "depthonly"sv, "cleardepth"sv, "vignette"sv,
-  };
-  for (auto effect : screenEffects) {
-    if (lowered.find(effect) != std::string_view::npos) return true;
-  }
-  return false;
-}
-
-// Runs whichever conversion the settings ask for and flattens the two result
-// shapes into one.
-//
-// The shader-translating path is the full conversion: it cross-compiles each
-// DirectX program to GLSL ES and rebuilds the archive around the shaders that
-// changed size. The retarget-only path is what this mod did before, kept as the
-// setting's off position so a translation that turns out worse than an unshaded
-// mesh can be backed out by reconverting rather than by waiting for a build.
-struct BundleConversionOutcome {
-  BundleConvert::Status status = BundleConvert::Status::Corrupt;
-  std::string message;
-};
-
-BundleConversionOutcome RunBundleConversion(std::string const& source, std::string const& dest) {
-  if (!GetTranslateShadersOnConversion()) {
-    auto const result = BundleConvert::ConvertToAndroid(source, dest);
-    // Deliberately not marked current: a retarget-only bundle is what the
-    // marker exists to invalidate, so turning the setting back on has to
-    // reconvert rather than reuse this.
-    return {result.status, result.message};
-  }
-  auto const conversion = BundleConvert::ConvertShadersToGles(source, dest);
-  if (conversion.status == BundleConvert::Status::Success) MarkConversionCurrent(dest);
-  // Logged here, on the worker, rather than folded into the message: a bundle
-  // can refuse several shaders and each reason is a line worth reading on its
-  // own when working out why a converted map still looks wrong.
-  for (auto const& refusal : conversion.refusals) {
-    PaperLogger.info("Vivify shader translation left a shader as it was -- {}", refusal);
-  }
-  if (conversion.shadersRefused > static_cast<int>(conversion.refusals.size())) {
-    PaperLogger.info("Vivify shader translation left {} further shader(s) as they were",
-                     conversion.shadersRefused - static_cast<int>(conversion.refusals.size()));
-  }
-  return {conversion.status, conversion.message};
-}
 
 std::string ResolveBundlePath(std::string const& levelPath) {
   std::string bundlePath = JoinPath(levelPath, kBundleFile);
@@ -141,21 +29,18 @@ std::string ResolveBundlePath(std::string const& levelPath) {
 
 // Finds a PC-built Vivify AssetBundle in a song folder, by content.
 //
-// Upstream Vivify names its bundle from VivifyController.BUNDLE_FILE,
-// $"bundle{BUNDLE_SUFFIX}.vivify" where BUNDLE_SUFFIX is "Windows2021" (or
-// "Windows2019" on 1.29.1), so a PC map normally ships bundleWindows2021.vivify
-// -- extension included. This port's own download path writes
-// bundleAndroid2021.vivify, and ResolveBundlePath already finds either by
-// extension.
+// Bundle file names are not standardised. This port's own download path writes
+// "bundleAndroid2021.vivify", but a map authored for PC ships whatever Vivify's
+// Unity exporter produced -- commonly "bundleWindows2019" or
+// "bundleWindows2021" with NO extension at all. The previous ".vivify"-only
+// scan therefore found nothing on exactly the maps the conversion path exists
+// to rescue: they were reported as "does not support your game version", the
+// play button stayed disabled, and no bundle was ever offered for conversion.
 //
-// The reason this scan is content-based rather than name-based anyway is that
-// the name is only a convention: re-zipped map downloads, hand-built bundles
-// and the Unity exporter's own output all turn up under other names, and a
-// bundle this function fails to find is a map that can never be converted and
-// so can never be played. Every candidate is checked for the UnityFS signature
-// instead. Names are used only to rank equally-valid candidates: a "windows"
-// name wins over a generic "bundle" name, which wins over anything else that
-// happens to be a Unity archive.
+// Every candidate is checked for the UnityFS signature instead, so the name
+// does not matter. Names are used only to rank equally-valid candidates: a
+// "windows" name wins over a generic "bundle" name, which wins over anything
+// else that happens to be a Unity archive.
 std::string ResolvePcBundlePath(std::string const& levelPath) {
   std::error_code ec;
   std::string best;
@@ -443,7 +328,7 @@ void Runtime::HandleLevelSelected(SongCore::API::LevelSelect::LevelWasSelectedEv
     }
     _preloadedBundlePath.clear();
   }
-  ResetRuntime("left the level");
+  ResetRuntime();
 
   _activeSabers.clear();
   _selectedLevelPath.clear();
@@ -471,25 +356,7 @@ void Runtime::HandleLevelSelected(SongCore::API::LevelSelect::LevelWasSelectedEv
     return;
   }
 
-  // Vivify changes how a map looks, not how it plays: no note timing, no
-  // scoring, nothing a leaderboard measures. Disabling submission for every
-  // Vivify map -- which is what this did unconditionally -- also stopped
-  // BeatLeader and ScoreSaber recording a replay, which is why Vivify maps had
-  // no replays to watch or render. Submission is on by default now, with a
-  // setting for anyone who wants the old behaviour.
-  bool const submit = GetSubmitScoresOnVivifyMaps();
-  MetaCore::Game::SetScoreSubmission("Vivify", submit);
-  PaperLogger.info("Vivify score submission: {} for this Vivify map",
-                   submit ? "enabled" : "disabled by setting");
-  // The settings that decide whether a map renders at all, recorded once per
-  // level. Chasing "geometry stopped being repaired halfway through a session"
-  // took a guess at which toggle had moved, because nothing in the log said
-  // what any of them were set to at the time.
-  PaperLogger.info("Vivify settings for this level: standInShading={} convertPcBundlesOnDevice={} "
-                   "disableCustomNoteVisuals={} disableAllBlits={} multipassRendering={}",
-                   BoolText(GetStandInShading()), BoolText(GetConvertPcBundlesOnDevice()),
-                   BoolText(GetDisableCustomNoteVisuals()), BoolText(GetDisableAllBlits()),
-                   BoolText(GetMultipassRenderingEnabled()));
+  MetaCore::Game::SetScoreSubmission("Vivify", false);
 
   std::string const androidBundlePath = JoinPath(_selectedLevelPath, std::string(kBundleFile));
 
@@ -510,8 +377,7 @@ void Runtime::HandleLevelSelected(SongCore::API::LevelSelect::LevelWasSelectedEv
   uint32_t const androidChecksum = ReadAndroidChecksumFromInfoDat(_selectedLevelPath);
   std::string const cachedConversion =
       pcBundleFallback.empty() ? std::string() : ConvertedBundlePath(pcBundleFallback);
-  bool const haveCachedConversion =
-      !cachedConversion.empty() && CachedConversionIsCurrent(cachedConversion);
+  bool const haveCachedConversion = !cachedConversion.empty() && std::filesystem::exists(cachedConversion);
 
   PaperLogger.info(
       "Vivify bundle selection: level='{}' androidBundle=no android2021={} pcBundle='{}' convertedCache='{}' cached={}",
@@ -635,7 +501,7 @@ void Runtime::ConvertPcBundleAsync(std::string const& levelPath, std::string con
   }
 
   std::string const destPath = ConvertedBundlePath(sourceBundlePath);
-  if (CachedConversionIsCurrent(destPath)) {
+  if (std::filesystem::exists(destPath)) {
     if (GetVivifyDebugLogging()) {
       PaperLogger.info("Vivify using cached converted bundle: '{}'", destPath);
     }
@@ -652,30 +518,14 @@ void Runtime::ConvertPcBundleAsync(std::string const& levelPath, std::string con
   // Conversion decompresses the whole archive, so it must not run on the main
   // thread. Results are handed back the same way the download path does it.
   std::thread([this, levelPath, sourceBundlePath, destPath]() {
-    BundleConversionOutcome const result = RunBundleConversion(sourceBundlePath, destPath);
+    BundleConvert::Result result = BundleConvert::ConvertToAndroid(sourceBundlePath, destPath);
     // A bundle that was already Android-targeted needs no rewrite; load it as-is.
     std::string loadPath = result.status == BundleConvert::Status::AlreadyAndroid ? sourceBundlePath : destPath;
-    bool const usable = result.status == BundleConvert::Status::Success ||
-                        result.status == BundleConvert::Status::AlreadyAndroid;
+    bool const usable = result.ok() || result.status == BundleConvert::Status::AlreadyAndroid;
     std::string const message = result.message;
     std::string const statusText{BundleConvert::StatusText(result.status)};
 
-    // Report what the source bundle's shaders were actually compiled for. This
-    // is the one place with the answer to "why does this map render with
-    // stand-in shading" that is not a guess: it reads the Shader assets and
-    // names their target platforms. Done on the worker, since it unpacks the
-    // archive a second time.
-    std::string shaderScanText;
-    if (usable) {
-      auto const scan = BundleConvert::ScanShaders(sourceBundlePath);
-      shaderScanText = BundleConvert::DescribeShaderScan(scan);
-    }
-
-    BSML::MainThreadScheduler::Schedule([this, levelPath, sourceBundlePath, loadPath, usable, message, statusText, shaderScanText]() {
-      if (!shaderScanText.empty()) {
-        _sourceBundleScanText = shaderScanText;
-        PaperLogger.info("Vivify source bundle shaders: {}", shaderScanText);
-      }
+    BSML::MainThreadScheduler::Schedule([this, levelPath, sourceBundlePath, loadPath, usable, message, statusText]() {
       // Only clear the in-flight marker if a newer conversion has not claimed it.
       if (_bundleConversionSource == sourceBundlePath) _bundleConversionSource.clear();
       if (usable) {
@@ -747,49 +597,6 @@ void Runtime::DownloadBundle(uint32_t checksum, std::string const& levelPath, st
   });
 }
 
-
-// Why a bundle shader cannot draw on this device.
-//
-// The port used to record a single bit per shader -- Shader.isSupported -- which
-// collapses two completely different failures into one indistinguishable
-// "unsupported", and every question about a broken map ("is this a geometry
-// shader problem?") stalls on not being able to tell them apart:
-//
-//   NoProgram       the bundle carries no shader program for this platform at
-//                   all. This is every shader in a converted PC bundle: the
-//                   archive was built by Unity for Windows, so its programs are
-//                   DirectX bytecode. Conversion rewrites the container's target
-//                   platform so the assets, meshes and materials load, but it
-//                   cannot invent GLES/Vulkan programs that were never compiled.
-//                   No device could run these, and no setting changes that.
-//
-//   DeviceRejected  the bundle does carry programs -- so it was built for
-//                   Android -- but this GPU accepts none of the subshaders.
-//                   THIS is the bucket a geometry-shader shader lands in.
-//                   Unity records each subshader's hardware requirements and
-//                   refuses the ones the device cannot meet; a geometry stage is
-//                   unavailable under Vulkan on Adreno (Qualcomm has never
-//                   exposed VkPhysicalDeviceFeatures.geometryShader), though it
-//                   is available under OpenGL ES 3.2 via GL_EXT_geometry_shader.
-//
-// Unity picks the highest-LOD subshader whose requirements the device meets, so
-// a shader that ships a geometry-shader subshader *and* a plain one is already
-// handled automatically and lands in Runnable. Only a shader whose every
-// subshader needs a stage this device lacks reaches DeviceRejected.
-namespace {
-enum class ShaderVerdict { Runnable, NoProgram, DeviceRejected, Dead };
-
-ShaderVerdict ClassifyBundleShader(UnityEngine::Shader* shader) {
-  if (!IsManagedAlive(shader)) return ShaderVerdict::Dead;
-  if (shader->get_isSupported()) return ShaderVerdict::Runnable;
-  // subshaderCount counts the subshaders that survived compilation *for this
-  // build target*. Zero means the serialised shader has no program for Android,
-  // which is the converted-PC-bundle case; non-zero means programs exist and the
-  // device turned every one of them down.
-  return shader->get_subshaderCount() > 0 ? ShaderVerdict::DeviceRejected : ShaderVerdict::NoProgram;
-}
-}  // namespace
-
 void Runtime::CacheBundleAssets() {
   if (_mainBundle == nullptr || !UnityEngine::Object::op_Implicit_bool(_mainBundle)) return;
   auto assetNames = _mainBundle->GetAllAssetNames();
@@ -797,11 +604,6 @@ void Runtime::CacheBundleAssets() {
   _assets.clear();
   _assetsByName.clear();
   _supportedShadersByName.clear();
-  int shadersSeen = 0;
-  int shadersRunnable = 0;
-  int shadersNoProgram = 0;
-  int shadersDeviceRejected = 0;
-  std::vector<std::string> deviceRejectedNames;
   for (auto assetName : assetNames) {
     if (!assetName) continue;
     std::string originalAssetPath = il2cpp_utils::detail::to_string(assetName);
@@ -835,31 +637,8 @@ void Runtime::CacheBundleAssets() {
         _assetsByName[nameKey] = asset;
       }
       if (auto* shader = il2cpp_utils::try_cast<UnityEngine::Shader>(asset).value_or(nullptr);
-          IsAlive(shader)) {
-        shadersSeen++;
-        switch (ClassifyBundleShader(shader)) {
-          case ShaderVerdict::Runnable:
-            shadersRunnable++;
-            if (!nameKey.empty()) _supportedShadersByName[nameKey] = shader;
-            break;
-          case ShaderVerdict::NoProgram:
-            shadersNoProgram++;
-            break;
-          case ShaderVerdict::DeviceRejected:
-            shadersDeviceRejected++;
-            // Named individually: this is the bucket that a map author can act
-            // on, by shipping a subshader without the stage this device lacks.
-            if (deviceRejectedNames.size() < 12) {
-              deviceRejectedNames.push_back(fmt::format("'{}' (subshaders={} passes={} maxLOD={})",
-                                                        ShaderNameForLog(shader),
-                                                        shader->get_subshaderCount(),
-                                                        shader->get_passCount(),
-                                                        shader->get_maximumLOD()));
-            }
-            break;
-          case ShaderVerdict::Dead:
-            break;
-        }
+          IsAlive(shader) && shader->get_isSupported() && !nameKey.empty()) {
+        _supportedShadersByName[nameKey] = shader;
       }
     }
     if (GetVivifyDebugLogging()) {
@@ -868,145 +647,11 @@ void Runtime::CacheBundleAssets() {
         LogMaterialShader("bundle-load", originalAssetPath, material);
       } else if (auto* shader = il2cpp_utils::try_cast<UnityEngine::Shader>(asset).value_or(nullptr);
                  IsAlive(shader)) {
-        PaperLogger.info("Vivify shader asset: path='{}' shader='{}' supported={} subshaders={}",
-                         originalAssetPath, ShaderNameForLog(shader), BoolText(shader->get_isSupported()),
-                         shader->get_subshaderCount());
+        PaperLogger.info("Vivify shader asset: path='{}' shader='{}' supported={}",
+                         originalAssetPath, ShaderNameForLog(shader), BoolText(shader->get_isSupported()));
       }
     }
   }
-
-  LogBundleShaderAudit(shadersSeen, shadersRunnable, shadersNoProgram, shadersDeviceRejected,
-                       deviceRejectedNames);
-}
-
-// One unconditional verdict per bundle, so a report of "the map is invisible" or
-// "geometry shaders don't work" can be answered from the log without a repro.
-void Runtime::LogBundleShaderAudit(int seen, int runnable, int noProgram, int deviceRejected,
-                                   std::vector<std::string> const& deviceRejectedNames) {
-  _auditShadersSeen = seen;
-  _auditShadersRunnable = runnable;
-  _auditShadersNoProgram = noProgram;
-  _auditShadersDeviceRejected = deviceRejected;
-  _auditRejectedNames = deviceRejectedNames;
-  if (seen == 0) return;
-
-  bool const converted = !_preloadedBundlePath.empty() &&
-                         _preloadedBundlePath.rfind(ConvertedBundleCacheDir(), 0) == 0;
-  PaperLogger.info(
-      "Vivify shaders: bundle='{}' converted={} total={} runnable={} noAndroidProgram={} deviceRejected={}",
-      _preloadedBundlePath, BoolText(converted), seen, runnable, noProgram, deviceRejected);
-
-  if (noProgram > 0) {
-    PaperLogger.warn(
-        "Vivify: {} of {} shaders in this bundle carry no Android program, so they cannot run on any Quest. "
-        "{} Materials using them fall back to stand-in shading, which keeps the models visible but loses their "
-        "real shading -- raymarching, post-processing and geometry-stage effects included.",
-        noProgram, seen,
-        converted ? "This bundle was converted from a PC build: its shader programs are DirectX bytecode, which "
-                    "conversion cannot translate. Only a bundle built for Android carries runnable programs."
-                  : "The bundle was not built for Android.");
-  }
-
-  if (deviceRejected > 0) {
-    // Programs exist, so the bundle really was built for Android and the GPU is
-    // the one refusing. A geometry or tessellation stage is the usual reason.
-    PaperLogger.warn(
-        "Vivify: {} of {} shaders were built for Android but this GPU accepts none of their subshaders. "
-        "A shader stage the device lacks is the usual cause -- under Vulkan on Adreno there is no geometry or "
-        "tessellation stage at all. A shader that also ships a subshader without that stage is selected "
-        "automatically and does not appear here.",
-        deviceRejected, seen);
-    for (auto const& name : deviceRejectedNames) {
-      PaperLogger.warn("Vivify shader rejected by device: {}", name);
-    }
-    if (deviceRejected > static_cast<int>(deviceRejectedNames.size())) {
-      PaperLogger.warn("Vivify: ... and {} more",
-                       deviceRejected - static_cast<int>(deviceRejectedNames.size()));
-    }
-  }
-}
-
-// Formats the on-device report for the current level.
-//
-// Written twice per level -- once at load, once at the end -- so that a level
-// which never finishes still leaves the load block behind. Everything a
-// "why is this map broken" question needs is here, because asking a player to
-// retrieve paperlog output is not reasonable.
-std::string Runtime::BuildLevelReport(std::string_view outcome) const {
-  std::string text;
-  auto line = [&text](std::string const& value) { text += value + "\n"; };
-  auto yesNo = [](bool value) { return value ? "yes" : "no"; };
-
-  line(fmt::format("Vivify {}   outcome: {}", VERSION, outcome));
-  line(fmt::format("Device:  {}", _graphicsSummary.empty() ? std::string("(not yet probed)") : _graphicsSummary));
-  line("");
-
-  line("Level");
-  line(fmt::format("  folder:        {}", _selectedLevelPath.empty() ? std::string("(none)") : _selectedLevelPath));
-  line(fmt::format("  bundle loaded: {}", _preloadedBundlePath.empty() ? std::string("(none)") : _preloadedBundlePath));
-  line(fmt::format("  converted:     {}",
-                   yesNo(!_preloadedBundlePath.empty() &&
-                         _preloadedBundlePath.rfind(ConvertedBundleCacheDir(), 0) == 0)));
-  line("");
-
-  // The numbers to read first for a freeze: all of this runs on the main thread
-  // while the level loads.
-  line("Level load timings (main thread)");
-  line(fmt::format("  cache bundle assets: {:8.0f} ms", _loadMsCacheAssets));
-  line(fmt::format("  decode textures:     {:8.0f} ms", _loadMsDecodeTextures));
-  line(fmt::format("  repair shaders:      {:8.0f} ms", _loadMsRepairShaders));
-  line(fmt::format("  total:               {:8.0f} ms", _loadMsTotal));
-  line("");
-
-  line("Frame watchdog");
-  line(fmt::format("  worst frame:        {:8.1f} ms", _worstFrameMs));
-  line(fmt::format("  stood down:         {}", yesNo(_selfDisabledThisLevel)));
-  if (_selfDisabledThisLevel) {
-    line("  Vivify disabled itself for this level after a sustained run of slow");
-    line("  frames, so the game kept running instead of freezing.");
-  }
-  line("");
-
-  line("Shaders in the loaded bundle");
-  line(fmt::format("  total:            {}", _auditShadersSeen));
-  line(fmt::format("  runnable here:    {}", _auditShadersRunnable));
-  line(fmt::format("  no Android build: {}  (DirectX-only; cannot run on any Quest)", _auditShadersNoProgram));
-  line(fmt::format("  refused by GPU:   {}  (built for Android, this GPU took none of them)",
-                   _auditShadersDeviceRejected));
-  for (auto const& name : _auditRejectedNames) {
-    line(fmt::format("    refused: {}", name));
-  }
-  line("");
-
-  line("Shader repair");
-  line(fmt::format("  unusable materials: {}", _shaderRepairAttempts));
-  line(fmt::format("  given a stand-in:   {}", _shaderRepairSucceeded));
-  line(fmt::format("  left broken:        {}", _shaderRepairFailed));
-  line("");
-
-  line("Textures");
-  line(fmt::format("  decoded:            {}", _texturesDecoded));
-  line(fmt::format("  skipped (over time budget): {}", _texturesSkipped));
-
-  if (!_sourceBundleScanText.empty()) {
-    line("");
-    line("Source bundle before conversion");
-    line(fmt::format("  {}", _sourceBundleScanText));
-  }
-  return text;
-}
-
-void Runtime::WriteLevelStartReport() {
-  _levelReportOpen = true;
-  Report::Append("LEVEL STARTED", BuildLevelReport("still playing (this block is written at load)"));
-}
-
-void Runtime::WriteLevelEndReport(std::string_view outcome) {
-  // Only for levels that actually opened a report, so leaving the menu does not
-  // append an empty block every time something calls ResetRuntime.
-  if (!_levelReportOpen) return;
-  _levelReportOpen = false;
-  Report::Append("LEVEL ENDED", BuildLevelReport(outcome));
 }
 
 void Runtime::PreloadBundle(std::string const& bundlePath) {
@@ -1063,7 +708,6 @@ void Runtime::LoadMainBundle() {
       PaperLogger.info("Vivify bundle preloaded, rebuilding asset caches: '{}'", bundlePath);
     }
     CacheBundleAssets();
-    DecodeUnsupportedBundleTextures();
     RepairLoadedMaterialShaders();
     return;
   }
@@ -1078,92 +722,30 @@ void Runtime::LoadMainBundle() {
     return;
   }
   _preloadedBundlePath = bundlePath;
-
-  // Time each phase unconditionally. All of this runs on the main thread while
-  // the level is loading, so when someone reports a freeze these three numbers
-  // say which phase to look at without needing a repro.
-  auto phase = [](char const* name, auto&& work) {
-    auto const start = std::chrono::steady_clock::now();
-    work();
-    double const ms =
-        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
-    if (ms > 250.0) {
-      PaperLogger.warn("Vivify level load: {} took {:.0f}ms", name, ms);
-    } else {
-      PaperLogger.info("Vivify level load: {} took {:.0f}ms", name, ms);
-    }
-    return ms;
-  };
-
-  _loadMsCacheAssets = phase("cache bundle assets", [this]() { CacheBundleAssets(); });
-  _loadMsDecodeTextures = phase("decode textures", [this]() { DecodeUnsupportedBundleTextures(); });
-  _loadMsRepairShaders = phase("repair shaders", [this]() { RepairLoadedMaterialShaders(); });
-  _loadMsTotal = _loadMsCacheAssets + _loadMsDecodeTextures + _loadMsRepairShaders;
-  PaperLogger.info("Vivify level load: {:.0f}ms total", _loadMsTotal);
-
-  // Written now, not at the end of the level: if this map is about to freeze,
-  // this block is the only one that will ever reach disk.
-  WriteLevelStartReport();
+  CacheBundleAssets();
+  RepairLoadedMaterialShaders();
 }
 
-UnityEngine::Object* Runtime::LookUpAsset(std::string_view assetName) const {
-  auto key = NormalizeAssetKey(assetName);
-  if (auto it = _assets.find(key); it != _assets.end()) {
+UnityEngine::Object* Runtime::GetAssetObject(std::string_view assetName) const {
+  auto it = _assets.find(NormalizeAssetKey(assetName));
+  if (it != _assets.end()) {
     return it->second;
   }
-  if (auto nameIt = _assetsByName.find(key); nameIt != _assetsByName.end()) {
+  auto nameIt = _assetsByName.find(NormalizeAssetKey(assetName));
+  if (nameIt != _assetsByName.end()) {
     return nameIt->second;
+  }
+  if (GetVivifyDebugLogging()) {
+    PaperLogger.warn("Vivify asset lookup miss: '{}'", std::string(assetName));
   }
   return nullptr;
 }
 
-UnityEngine::Object* Runtime::GetAssetObject(std::string_view assetName) const {
-  auto* asset = LookUpAsset(assetName);
-  if (asset == nullptr && GetVivifyDebugLogging()) {
-    PaperLogger.warn("Vivify asset lookup miss: '{}'", std::string(assetName));
-  }
-  return asset;
-}
-
-// Names the graphics API, which decides whether a shader stage like a geometry
-// shader can exist on this device at all.
-//
-// Adreno exposes GL_EXT_geometry_shader under OpenGL ES 3.2, but reports
-// VkPhysicalDeviceFeatures.geometryShader as false under Vulkan -- Qualcomm has
-// never supported geometry or tessellation stages in their Vulkan driver. So on
-// Vulkan a geometry shader cannot run here no matter what the bundle contains,
-// and no mod-side setting changes that: the graphics API is baked into the
-// game's APK at build time.
-std::string_view GraphicsApiName(int32_t graphicsDeviceType) {
-  switch (graphicsDeviceType) {
-    case 0x0b: return "OpenGLES3";
-    case 0x10: return "Metal";
-    case 0x11: return "OpenGLCore";
-    case 0x15: return "Vulkan";
-    default: return "other";
-  }
-}
-
 void Runtime::LogUnityPlatformInfoOnce() {
-  if (_loggedUnityPlatformInfo) return;
+  if (!GetVivifyDebugLogging() || _loggedUnityPlatformInfo) return;
   _loggedUnityPlatformInfo = true;
   auto stereoMode = UnityEngine::XR::XRSettings::get_stereoRenderingMode();
   auto graphicsType = UnityEngine::SystemInfo::get_graphicsDeviceType();
-  int const shaderLevel = UnityEngine::SystemInfo::get_graphicsShaderLevel();
-
-  // Shader level is reported as 10x the shader model: 45 is SM4.5. Geometry
-  // stages need SM4.0, so anything below 40 rules them out outright; at or
-  // above 40 it comes down to the API above.
-  _graphicsSummary = fmt::format(
-      "api={} ({}) shaderLevel={} (SM{}.{}) geometryShaderStagePossible={} gpu='{}'",
-      GraphicsApiName(graphicsType.value__), graphicsType.value__, shaderLevel, shaderLevel / 10,
-      shaderLevel % 10,
-      BoolText(shaderLevel >= 40 && graphicsType.value__ != 0x15),
-      ToStdString(UnityEngine::SystemInfo::get_graphicsDeviceName()));
-  PaperLogger.info("Vivify graphics: {}", _graphicsSummary);
-
-  if (!GetVivifyDebugLogging()) return;
-
   PaperLogger.info(
       "Vivify platform: os='{}' device='{}' gpu='{}' vendor='{}' api={} stereoMode={} xrOcclusionMesh={} supportsInstancing={} supportsR8={} supportsDepthRT={}",
       ToStdString(UnityEngine::SystemInfo::get_operatingSystem()),
@@ -1208,86 +790,13 @@ void Runtime::LogMaterialShader(std::string_view context, std::string_view asset
                    BoolText(IsInternalErrorShaderName(shaderName)));
 }
 
-// Indexes every supported shader loaded in this process by name, once per level.
-//
-// This is what makes a map's own shader names mean something. A PC bundle does
-// not only carry shaders the map author wrote: it carries a *copy* of every
-// shader its materials referenced, including the game's own and Unity's
-// built-ins, each compiled for DirectX and useless here. A real session log
-// shows the result:
-//
-//   material='snail' shader='BeatSaber/Standard' supported=false
-//   material='tube'  shader='BeatSaber/Tube_OptimizedNoise_FastMath' supported=false
-//   material='Disco_Lights' shader='Legacy Shaders/Particles/Additive' supported=false
-//
-// Beat Saber has BeatSaber/Standard. Unity has Legacy Shaders/Particles/
-// Additive. Both are sitting in the process, working, and the map wants exactly
-// them -- but Shader.Find returns the bundle's broken copy of the same name, it
-// fails the isSupported test, and the material was handed a generic stand-in
-// instead of the shader it actually asked for.
-//
-// Scanning for a shader that both matches the name and runs finds the real one.
-void Runtime::EnsureGameShaderIndex() {
-  if (_gameShaderIndexBuilt) return;
-  _gameShaderIndexBuilt = true;
-
-  auto allShaders = UnityEngine::Resources::FindObjectsOfTypeAll<UnityEngine::Shader*>();
-  if (!allShaders) return;
-  for (int i = 0; i < allShaders.size(); i++) {
-    auto* candidate = allShaders[i];
-    // Only shaders that run are indexed, so a bundle's dead copy of a name can
-    // never shadow the working one.
-    if (!IsAlive(candidate) || !candidate->get_isSupported()) continue;
-    auto name = candidate->get_name();
-    if (!name) continue;
-    std::string key = NormalizeAssetKey(ToStdString(name));
-    if (key.empty()) continue;
-    _gameShadersByName.emplace(std::move(key), candidate);
-  }
-  PaperLogger.info("Vivify shader index: {} runnable shader name(s) available in this process",
-                   _gameShadersByName.size());
-  // Which shaders a Quest build actually ships decides which stand-in Vivify can
-  // pick, and that list is not knowable from a PC checkout -- it has to come off
-  // a headset. Logging the names once per level costs one line and makes a
-  // session log enough to tune the fallback ordering.
-  if (!_gameShadersByName.empty()) {
-    std::string names;
-    for (auto const& entry : _gameShadersByName) {
-      if (!names.empty()) names += ", ";
-      names += entry.first;
-      // One line, not a log flood: the tail is only ever more of the same.
-      if (names.size() > 4000) {
-        names += ", ...";
-        break;
-      }
-    }
-    PaperLogger.info("Vivify shader index contents: {}", names);
-  }
-}
-
-UnityEngine::Shader* Runtime::FindUsableShader(std::string const& shaderName) {
+UnityEngine::Shader* Runtime::FindUsableShader(std::string const& shaderName) const {
   if (shaderName.empty()) return nullptr;
-  auto const key = NormalizeAssetKey(shaderName);
-  if (auto it = _supportedShadersByName.find(key);
+  if (auto it = _supportedShadersByName.find(NormalizeAssetKey(shaderName));
       it != _supportedShadersByName.end() && IsAlive(it->second) && it->second->get_isSupported()) {
     return it->second;
   }
-  // The map asked for this shader by name and something in the process answers
-  // to it. That is a far better answer than a generic stand-in: same name means
-  // same properties, so the material's colours and textures land where they
-  // were meant to.
-  EnsureGameShaderIndex();
-  if (auto it = _gameShadersByName.find(key);
-      it != _gameShadersByName.end() && IsAlive(it->second) && it->second->get_isSupported()) {
-    return it->second;
-  }
-  // Deliberately the quiet lookup: this searches by *shader* name
-  // ("Swifter/VFX/Star"), and the asset maps are keyed by asset path and file
-  // name, so a miss here is the normal case rather than a problem. Routing it
-  // through GetAssetObject logged one "asset lookup miss" warning per attempt
-  // -- 332 of them in a single session, one for every shader the repair pass
-  // tried to find a supported twin for.
-  auto* bundled = il2cpp_utils::try_cast<UnityEngine::Shader>(LookUpAsset(shaderName)).value_or(nullptr);
+  auto* bundled = il2cpp_utils::try_cast<UnityEngine::Shader>(GetAssetObject(shaderName)).value_or(nullptr);
   if (IsAlive(bundled) && bundled->get_isSupported()) {
     return bundled;
   }
@@ -1315,116 +824,25 @@ UnityEngine::Shader* Runtime::FindFallbackShader() {
   if (IsAlive(_fallbackShader) && _fallbackShader->get_isSupported()) {
     return _fallbackShader;
   }
-  // A failed search has to be remembered too. This walks every shader object
-  // loaded in the process -- thousands, in Beat Saber -- calling get_isSupported,
-  // get_name and FindPropertyIndex on each. RepairMaterialShader calls it for
-  // every material it cannot fix, and prefab instances bring fresh materials, so
-  // without a negative cache one unfixable bundle turns into a full shader-database
-  // scan per material per spawn. That is not a slow frame, it is a stopped game.
-  if (_fallbackShaderSearchFailed) return nullptr;
   _fallbackShader = nullptr;
-  EnsureGameShaderIndex();
 
-  // Shader.Find only resolves shaders included in the build or already loaded
-  // from a bundle, and on Quest almost none of Beat Saber's own shaders answer
-  // to it -- which is why a by-name search kept falling through to Unity's
-  // built-ins. The index built from Resources.FindObjectsOfTypeAll does answer,
-  // so it is asked first.
-  auto resolveByName = [this](std::string_view name) -> UnityEngine::Shader* {
-    auto const key = NormalizeAssetKey(std::string(name));
-    if (auto it = _gameShadersByName.find(key); it != _gameShadersByName.end()) {
-      if (IsAlive(it->second) && it->second->get_isSupported()) return it->second;
-    }
-    auto* found = UnityEngine::Shader::Find(StringW(std::string(name))).unsafePtr();
-    if (IsAlive(found) && found->get_isSupported()) return found;
-    return nullptr;
-  };
-
-  // A stand-in that cannot be tinted is why notes came out white. Note and
-  // saber replacements are coloured by writing _Color into a
-  // MaterialPropertyBlock, so a shader is only fully acceptable here if the
-  // colour can actually land on it.
-  auto carriesColour = [](UnityEngine::Shader* shader) {
-    return shader->FindPropertyIndex(StringW("_Color")) >= 0 ||
-           shader->FindPropertyIndex(StringW("_BaseColor")) >= 0;
-  };
-
-  // Names worth trying directly, best first. Every entry here shades opaque 3D
-  // geometry.
-  //
-  // Sprites/Default and UI/Default used to be on this list, and that is what
-  // turned converted maps black: a sprite shader carries _Color, so requiring
-  // _Color promoted it over Unlit/Texture, and then it was handed 3D meshes.
-  // Sprites/Default multiplies by the vertex COLOR stream, blends against the
-  // frame, and writes no depth -- a mesh with no vertex-colour channel (which
-  // is most map geometry) reads whatever the driver leaves in that register,
-  // and on the Quest's GLES driver that is zero. Black geometry, blended over
-  // a black frame. Neither shader belongs anywhere near a mesh.
-  // An explicit choice wins over every heuristic below.
-  //
-  // Which shader stands in acceptably depends on what a given Beat Saber build
-  // ships and how the map lights its scene, and neither is knowable from
-  // anywhere but a headset. Rather than another round of guessing, a name from
-  // the shader index this logs at level start can be put in
-  // standInShaderName in the mod's config and tried at once.
-  std::string const requested = GetStandInShaderName();
-  if (!requested.empty()) {
-    auto* chosen = resolveByName(requested);
-    if (chosen != nullptr) {
-      _fallbackShader = chosen;
-      PaperLogger.info("Vivify fallback shader: using '{}', named by the standInShaderName setting",
-                       ShaderNameForLog(chosen));
-      return _fallbackShader;
-    }
-    PaperLogger.warn("Vivify fallback shader: the standInShaderName setting asks for '{}', which is "
-                     "not among the runnable shaders on this device; choosing automatically instead",
-                     requested);
-  }
-
-  // Unlit first, lit last, and that order is the whole point.
-  //
-  // A Vivify map replaces the environment, and the environment is where Beat
-  // Saber's lights live. A lit shader in a scene with no lights returns black
-  // no matter what colour or texture is fed to it -- which is what a converted
-  // level looked like for several builds while Custom/SimpleLit, a lit shader,
-  // sat at the top of this list. The giveaway was that particles still showed:
-  // particle materials are unlit and additive, so they were the only things a
-  // missing light source could not switch off.
-  //
-  // The scored scan below has always ranked "unlit" above "simplelit"; this
-  // list was overriding it before the scan ever ran.
+  // Names worth trying directly, cheapest first. Beat Saber's own shaders come
+  // before Unity's built-ins because they are the ones actually present.
   static constexpr std::string_view preferredNames[] = {
-      "BeatSaber/Unlit Glow"sv,  "Custom/UnlitGlow"sv,     "Unlit/Texture"sv,
-      "Unlit/Color"sv,           "Custom/Glowing"sv,       "Custom/GlowingInstancedHD"sv,
-      "Custom/OpaqueNeonLight"sv,
-      // Everything past here needs a light to show anything at all, and is only
-      // reached when the device has none of the above.
-      "Custom/SimpleLit"sv,      "Standard"sv,             "Mobile/Diffuse"sv,
-      "Legacy Shaders/Diffuse"sv,
+      "Custom/SimpleLit"sv, "Custom/Glowing"sv,     "BeatSaber/Unlit Glow"sv,
+      "Unlit/Texture"sv,    "Unlit/Color"sv,        "Sprites/Default"sv,
+      "UI/Default"sv,       "Standard"sv,
   };
-  // A named 3D shader that cannot be tinted still beats a sprite shader, so a
-  // colourless one is kept as a runner-up rather than discarded outright.
-  UnityEngine::Shader* colourlessRunnerUp = nullptr;
   for (auto name : preferredNames) {
-    auto* candidate = resolveByName(name);
-    if (candidate == nullptr) continue;
-    if (carriesColour(candidate)) {
+    auto* candidate = UnityEngine::Shader::Find(StringW(std::string(name))).unsafePtr();
+    if (IsAlive(candidate) && candidate->get_isSupported()) {
       _fallbackShader = candidate;
-      PaperLogger.info("Vivify fallback shader: using '{}' (named candidate, tintable, "
-                       "mainTex={})",
-                       ShaderNameForLog(candidate),
-                       BoolText(candidate->FindPropertyIndex(StringW("_MainTex")) >= 0));
+      PaperLogger.info("Vivify fallback shader: using '{}'", ShaderNameForLog(candidate));
       return _fallbackShader;
     }
-    if (colourlessRunnerUp == nullptr) colourlessRunnerUp = candidate;
   }
 
   // Nothing by name -- score every shader currently loaded and take the best.
-  //
-  // The category decides the winner and the property bonuses only break ties
-  // within a category. They used to be worth 50 each against category scores
-  // 10 apart, so "some sprite shader with a texture and a colour" outranked
-  // every real lit shader in the process.
   auto scoreShader = [](std::string const& lowerName) -> int {
     // Shaders that exist but would draw nothing useful for arbitrary geometry.
     static constexpr std::string_view excluded[] = {
@@ -1435,18 +853,13 @@ UnityEngine::Shader* Runtime::FindFallbackShader() {
     for (auto bad : excluded) {
       if (lowerName.find(bad) != std::string::npos) return -1;
     }
-    // Sprite and UI shaders sort *below* an unrecognised shader, not above it:
-    // they are 2D shaders and drawing a mesh with one is the failure this
-    // ordering exists to avoid. They stay on the list only as a last resort.
-    if (lowerName.find("sprite") != std::string::npos) return 5;
-    if (lowerName.find("ui/") != std::string::npos) return 4;
     if (lowerName.find("unlit") != std::string::npos) return 100;
     if (lowerName.find("simplelit") != std::string::npos) return 90;
     if (lowerName.find("standard") != std::string::npos) return 80;
     if (lowerName.find("glow") != std::string::npos) return 70;
     if (lowerName.find("lit") != std::string::npos) return 60;
-    if (lowerName.find("diffuse") != std::string::npos) return 50;
-    if (lowerName.find("particle") != std::string::npos) return 15;
+    if (lowerName.find("sprite") != std::string::npos) return 30;
+    if (lowerName.find("ui/") != std::string::npos) return 20;
     return 10;
   };
 
@@ -1461,16 +874,19 @@ UnityEngine::Shader* Runtime::FindFallbackShader() {
       std::string lowerName = ToStdString(name);
       std::transform(lowerName.begin(), lowerName.end(), lowerName.begin(),
                      [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-      int score = scoreShader(lowerName);
-      if (score <= 0) continue;
+      int const score = scoreShader(lowerName);
+        int score = scoreShader(lowerName);
       // A stand-in is only useful if the original material's look can be
       // carried across. One that exposes neither _MainTex nor a colour renders
       // everything flat white, which is what made converted maps come up
-      // partially or fully white. These break ties inside a category; they
-      // never promote one category over another.
-      score *= 100;
-      if (candidate->FindPropertyIndex(StringW("_MainTex")) >= 0) score += 30;
-      if (carriesColour(candidate)) score += 40;
+      // partially or fully white.
+      if (score > 0) {
+        if (candidate->FindPropertyIndex(StringW("_MainTex")) >= 0) score += 50;
+        if (candidate->FindPropertyIndex(StringW("_Color")) >= 0 ||
+            candidate->FindPropertyIndex(StringW("_BaseColor")) >= 0) {
+          score += 50;
+        }
+      }
       if (score <= bestScore) continue;
       bestScore = score;
       _fallbackShader = candidate;
@@ -1480,22 +896,11 @@ UnityEngine::Shader* Runtime::FindFallbackShader() {
   if (IsAlive(_fallbackShader)) {
     PaperLogger.info("Vivify fallback shader: scanned loaded shaders, using '{}' (score {})",
                      ShaderNameForLog(_fallbackShader), bestScore);
-    return _fallbackShader;
+  } else {
+    PaperLogger.error("Vivify fallback shader: no usable shader found; assets with unsupported "
+                      "shaders will not render");
   }
-
-  if (IsAlive(colourlessRunnerUp)) {
-    _fallbackShader = colourlessRunnerUp;
-    PaperLogger.info("Vivify fallback shader: using '{}' (named candidate; it has no colour "
-                     "property, so stand-ins wear their texture untinted)",
-                     ShaderNameForLog(_fallbackShader));
-    return _fallbackShader;
-  }
-
-  _fallbackShaderSearchFailed = true;
-  PaperLogger.warn(
-      "Vivify found no usable stand-in shader among the shaders loaded in this process. "
-      "Materials with unsupported shaders will be left alone rather than rescanning every time.");
-  return nullptr;
+  return _fallbackShader;
 }
 
 void Runtime::RepairMaterialShader(UnityEngine::Material* material, std::string_view context) {
@@ -1542,57 +947,24 @@ void Runtime::RepairMaterialShader(UnityEngine::Material* material, std::string_
   if (!IsAlive(replacement)) {
     replacement = FindFallbackShader();
   }
-  // A material with nothing to carry over used to be left with its dead shader,
-  // on the reasoning that a flat white mesh is worse than none. In practice it
-  // is the other way round, and this is why models go missing on maps whose
-  // shaders otherwise work: a material with no colour-shaped property and no
-  // texture -- which is most of a raymarch or effect material, whose properties
-  // are things like _Speed and _Iterations -- simply never drew. The 0.8.9 log
-  // from a real session declined 299 of them in one sitting, and the issue
-  // thread describes the result exactly: "blank for some of the intro, then it
-  // has the graphics for some of the sections".
-  //
-  // The stand-in is taken now, tinted a dim neutral grey rather than left at
-  // white. That keeps the original worry honest -- a large or full-screen mesh
-  // no longer flashes blinding white -- while the geometry is at least present.
-  // Anyone who prefers the old behaviour has the "Stand-In Shading" toggle,
-  // which is the one case still declined here.
+  // Substituting a stand-in trades "invisible" for "visible but wrong". That is
+  // only a good trade when something of the original look survives: if neither
+  // a colour nor a texture could be recovered, the stand-in paints an arbitrary
+  // flat white shape over the scene, which for a large or full-screen mesh is
+  // considerably worse than the object simply not drawing. Leave the dead
+  // shader in place instead -- for notes and sabers ReplacementCanRender then
+  // keeps the game's own visuals, which look right.
   bool const canCarryLook = fallbackState.color.has_value() || IsManagedAlive(fallbackState.mainTexture);
-  bool const usingGenericStandIn = IsAlive(replacement) && replacement == _fallbackShader;
-  if (usingGenericStandIn && !GetStandInShading()) {
+  bool const declineStandIn = IsAlive(replacement) && replacement == _fallbackShader &&
+                              (!canCarryLook || !GetStandInShading());
+  if (declineStandIn) {
     _shaderRepairFailed++;
-    PaperLogger.warn("Vivify shader stand-in declined: material '{}' (shader '{}') -- "
-                     "stand-in shading is turned off in settings",
-                     ToStdString(material->get_name()), originalShaderName);
+    PaperLogger.warn("Vivify shader stand-in declined: material '{}' (shader '{}') -- {}",
+                     ToStdString(material->get_name()), originalShaderName,
+                     !GetStandInShading() ? "stand-in shading is turned off in settings"
+                                          : "no colour or texture to carry over, so it would render flat white");
     _repairedMaterials.emplace(material);
     return;
-  }
-  if (usingGenericStandIn && !canCarryLook && IsScreenSpaceEffectShader(originalShaderName)) {
-    // A grey stand-in is right for a mesh and wrong for a screen effect.
-    //
-    // A blit, a skybox, a stencil mask and a fog volume are all geometry that
-    // covers the view: their own shader is what makes them subtle or invisible,
-    // and none of that survives the substitution. Painting them opaque grey
-    // does not approximate the effect, it hangs a wall in front of the map --
-    // which is what a converted level looked like even after two hundred
-    // materials were "repaired". These are left undrawn instead, which is what
-    // they would have been before the stand-in existed.
-    _shaderRepairFailed++;
-    _screenEffectsDeclined++;
-    PaperLogger.warn("Vivify shader stand-in declined: material '{}' (shader '{}') is a screen or "
-                     "masking effect, and a stand-in for one covers the view instead of "
-                     "approximating it",
-                     ToStdString(material->get_name()), originalShaderName);
-    _repairedMaterials.emplace(material);
-    return;
-  }
-  if (usingGenericStandIn && !canCarryLook) {
-    // Dim, opaque, and deliberately unlike anything a map would author, so it
-    // reads as "this is a stand-in" rather than as the intended look.
-    fallbackState.color = UnityEngine::Color(0.25f, 0.25f, 0.28f, 1.0f);
-    PaperLogger.warn("Vivify shader stand-in: material '{}' (shader '{}') had no colour or texture "
-                     "to carry over, so it is drawn in neutral grey rather than not at all",
-                     ToStdString(material->get_name()), originalShaderName);
   }
 
   if (IsAlive(replacement)) {
@@ -1676,194 +1048,10 @@ void Runtime::RefreshLoadedMaterialStereoKeywords() {
   }
 }
 
-
-// Decodes a block-compressed texture this GPU cannot sample into RGBA32.
-//
-// Quest's Adreno GPUs support ETC2 and ASTC but not S3TC/BC, and a PC-built
-// AssetBundle stores its textures as BC1/BC3/BC7. Unity will happily hand back
-// the Texture2D object, but nothing can sample it -- which is why converted
-// maps came through untextured even once their materials carried the right
-// colour. Decoding on the CPU costs memory (BC1 is 4 bits per pixel, RGBA32 is
-// 32) but produces something that actually renders.
-//
-// Requires the source texture's raw bytes to still be available; a texture
-// imported without read/write enabled may have had its CPU copy dropped, in
-// which case there is nothing to decode and the original is returned unchanged.
-UnityEngine::Texture* Runtime::ResolveUsableTexture(UnityEngine::Texture* texture) {
-  if (!IsAlive(texture)) return texture;
-  if (auto cached = _decodedTextures.find(texture); cached != _decodedTextures.end()) {
-    return IsAlive(cached->second) ? cached->second : texture;
-  }
-
-  auto* source = il2cpp_utils::try_cast<UnityEngine::Texture2D>(texture).value_or(nullptr);
-  if (!IsAlive(source)) return texture;
-
-  int const unityFormat = source->get_format().value__;
-  if (UnityEngine::SystemInfo::SupportsTextureFormat(source->get_format())) {
-    _decodedTextures[texture] = nullptr;
-    return texture;
-  }
-
-  auto const format = TextureDecode::FromUnityTextureFormat(unityFormat);
-  std::string const name = ToStdString(source->get_name());
-  if (format == TextureDecode::Format::Unsupported) {
-    PaperLogger.warn("Vivify texture '{}': format {} is unsupported here and cannot be decoded", name, unityFormat);
-    _decodedTextures[texture] = nullptr;
-    return texture;
-  }
-
-  int const width = source->get_width();
-  int const height = source->get_height();
-  int const mipCount = std::max(1, source->get_mipmapCount());
-
-  ArrayW<uint8_t, Array<uint8_t>*> raw = nullptr;
-  try {
-    raw = source->GetRawTextureData();
-  } catch (...) {
-    raw = nullptr;
-  }
-  if (!raw || raw.size() == 0) {
-    PaperLogger.warn("Vivify texture '{}' ({}, {}x{}): no raw data available to decode -- the texture was "
-                     "imported without read/write enabled, so its CPU copy is gone",
-                     name, TextureDecode::FormatName(format), width, height);
-    _decodedTextures[texture] = nullptr;
-    return texture;
-  }
-
-  std::vector<uint8_t> decoded;
-  if (!TextureDecode::DecodeToRgba32(format, raw.begin(), static_cast<size_t>(raw.size()), width, height, mipCount,
-                                     decoded)) {
-    PaperLogger.warn("Vivify texture '{}' ({}, {}x{}, {} mip(s)): {} byte(s) of data did not decode",
-                     name, TextureDecode::FormatName(format), width, height, mipCount, raw.size());
-    _decodedTextures[texture] = nullptr;
-    return texture;
-  }
-
-  auto* replacement = UnityEngine::Texture2D::New_ctor(width, height, UnityEngine::TextureFormat::RGBA32,
-                                                       mipCount, false);
-  if (!IsAlive(replacement)) {
-    _decodedTextures[texture] = nullptr;
-    return texture;
-  }
-  auto managed = ArrayW<uint8_t, Array<uint8_t>*>(static_cast<il2cpp_array_size_t>(decoded.size()));
-  std::memcpy(managed.begin(), decoded.data(), decoded.size());
-  replacement->LoadRawTextureData(managed);
-  replacement->Apply();
-  replacement->set_wrapMode(source->get_wrapMode());
-  replacement->set_filterMode(source->get_filterMode());
-  replacement->set_name(StringW(name + " (decoded)"));
-
-  PaperLogger.info("Vivify texture decoded: '{}' {} {}x{} ({} mip(s)) -> RGBA32", name,
-                   TextureDecode::FormatName(format), width, height, mipCount);
-  _decodedTextures[texture] = replacement;
-  return replacement;
-}
-
-// Walks every material in the bundle and swaps any texture this GPU cannot
-// sample for a decoded copy. Runs once per bundle load, before shader repair,
-// so a material that keeps its own working shader still gets usable textures.
-void Runtime::DecodeUnsupportedBundleTextures() {
-  int swapped = 0;
-  int skipped = 0;
-  _texturesScannedMaterials.clear();
-
-  // Block-compressed decoding is real CPU work on the main thread: a 2048x2048
-  // BC7 texture is four million pixels, and a bundle can hold dozens. Left
-  // unbounded it stalls the game for as long as it takes, which is
-  // indistinguishable from a freeze. Decode what fits in the budget, skip the
-  // rest, and say how many were skipped -- a few untextured materials beat a
-  // hung game.
-  // Raised from two seconds along with the prefab walk above. That walk finds
-  // the materials that carry most of a map's textures, so the old budget --
-  // sized for the handful of standalone Material assets -- would now be spent
-  // long before the scene geometry was reached, and a skipped texture is a
-  // black one. A converted map already pays seconds for the conversion itself;
-  // several more on first load beat a level that cannot be seen.
-  constexpr double kDecodeBudgetMs = 8000.0;
-  auto const start = std::chrono::steady_clock::now();
-  auto elapsedMs = [&start]() {
-    return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
-  };
-
-  auto decodeMaterial = [&](UnityEngine::Material* material) {
-    if (!IsAlive(material)) return;
-    // A material reached through several renderers is the same material; doing
-    // it twice would only spend budget.
-    if (!_texturesScannedMaterials.emplace(material).second) return;
-    auto names = material->GetPropertyNames(UnityEngine::MaterialPropertyType::Texture);
-    if (!names) return;
-    for (auto name : names) {
-      if (!name) continue;
-      auto* current = material->GetTexture(name).unsafePtr();
-      if (!IsAlive(current)) continue;
-      // An already-decoded texture is a cache hit and costs nothing, so the
-      // budget only gates work that has not been done yet.
-      if (elapsedMs() > kDecodeBudgetMs && !_decodedTextures.contains(current)) {
-        skipped++;
-        continue;
-      }
-      auto* usable = ResolveUsableTexture(current);
-      if (IsAlive(usable) && usable != current) {
-        material->SetTexture(name, usable);
-        swapped++;
-      }
-    }
-  };
-
-  // The same two kinds of asset the shader repair walks, and for the same
-  // reason.
-  //
-  // This used to consider only Material assets. Nearly every material in a
-  // Vivify map is not one: it hangs off a renderer inside a prefab
-  // (assets/.../prefabs/scene1.prefab and friends), which is exactly why
-  // RepairLoadedMaterialShaders walks GameObjects as well. So scene geometry
-  // had its shader repaired and its textures left as DirectX block-compressed
-  // data that an Adreno cannot sample -- which reads as black. A material with
-  // no texture at all was unaffected and drew as a flat pale shape, so the
-  // symptom was a black level with a few white objects and the particles still
-  // showing.
-  for (auto const& [path, asset] : _assets) {
-    if (!IsAlive(asset)) continue;
-    if (auto* material = il2cpp_utils::try_cast<UnityEngine::Material>(asset).value_or(nullptr);
-        IsAlive(material)) {
-      decodeMaterial(material);
-      continue;
-    }
-    auto* gameObject = il2cpp_utils::try_cast<UnityEngine::GameObject>(asset).value_or(nullptr);
-    if (!IsAlive(gameObject)) continue;
-    auto renderers = gameObject->GetComponentsInChildren<UnityEngine::Renderer*>(true);
-    for (int i = 0; i < renderers.size(); i++) {
-      auto* renderer = renderers[i];
-      if (!IsAlive(renderer)) continue;
-      auto materials = renderer->get_sharedMaterials();
-      if (!materials) continue;
-      for (int j = 0; j < materials.size(); j++) {
-        decodeMaterial(materials[j].unsafePtr());
-      }
-    }
-  }
-  _texturesDecoded = swapped;
-  _texturesSkipped = skipped;
-  // Logged even when nothing was found, and that is the point: this pass
-  // printing nothing at all is how it went unnoticed that it was looking in the
-  // wrong place. "scanned 0" is a symptom; silence is not.
-  PaperLogger.info(
-      "Vivify texture decode: scanned {} material(s), replaced {} unsupported texture "
-      "reference(s) in {:.0f}ms, skipped {} over budget",
-      _texturesScannedMaterials.size(), swapped, elapsedMs(), skipped);
-  if (skipped > 0) {
-    PaperLogger.warn(
-        "Vivify stopped decoding textures after {:.0f}ms and left {} reference(s) on their original, "
-        "unsampleable format. Those materials render untextured rather than stalling the game.",
-        kDecodeBudgetMs, skipped);
-  }
-}
-
 void Runtime::RepairLoadedMaterialShaders() {
   _shaderRepairAttempts = 0;
   _shaderRepairSucceeded = 0;
   _shaderRepairFailed = 0;
-  _screenEffectsDeclined = 0;
   for (auto const& [path, asset] : _assets) {
     if (!IsAlive(asset)) continue;
     if (auto* material = il2cpp_utils::try_cast<UnityEngine::Material>(asset).value_or(nullptr); IsAlive(material)) {
@@ -1876,9 +1064,7 @@ void Runtime::RepairLoadedMaterialShaders() {
     // Worth logging unconditionally: a bundle whose shaders all had to be
     // replaced is a converted PC bundle rendering with stand-in shading, and a
     // non-zero failure count means some of it will not draw at all.
-    PaperLogger.info("Vivify shader repair: {} screen/masking effect(s) left undrawn on purpose",
-                   _screenEffectsDeclined);
-  PaperLogger.info("Vivify shader repair: {} material(s) had an unusable shader, {} replaced, {} could not be",
+    PaperLogger.info("Vivify shader repair: {} material(s) had an unusable shader, {} replaced, {} could not be",
                      _shaderRepairAttempts, _shaderRepairSucceeded, _shaderRepairFailed);
   }
 }
@@ -1924,7 +1110,7 @@ bool IsBulkPcBundleConversionRunning() {
   return gBulkConversionRunning.load();
 }
 
-void StartBulkPcBundleConversion(std::function<void(BulkConversionProgress const&)> onProgress, bool force) {
+void StartBulkPcBundleConversion(std::function<void(BulkConversionProgress const&)> onProgress) {
   bool expected = false;
   if (!gBulkConversionRunning.compare_exchange_strong(expected, true)) {
     return;
@@ -1935,7 +1121,7 @@ void StartBulkPcBundleConversion(std::function<void(BulkConversionProgress const
   // worker only needs the snapshot.
   auto levels = CollectCustomLevelDirectories();
 
-  std::thread([onProgress = std::move(onProgress), levels = std::move(levels), force]() {
+  std::thread([onProgress = std::move(onProgress), levels = std::move(levels)]() {
     auto report = [&onProgress](BulkConversionProgress progress) {
       if (!onProgress) return;
       BSML::MainThreadScheduler::Schedule([onProgress, progress]() { onProgress(progress); });
@@ -1944,8 +1130,7 @@ void StartBulkPcBundleConversion(std::function<void(BulkConversionProgress const
     BulkConversionProgress progress;
     try {
       progress.levelsTotal = static_cast<int>(levels.size());
-      progress.status = std::string(force ? "Reconverting " : "Scanning ") +
-                        std::to_string(progress.levelsTotal) + " level(s)...";
+      progress.status = "Scanning " + std::to_string(progress.levelsTotal) + " level(s)...";
       report(progress);
 
       for (auto const& level : levels) {
@@ -1960,37 +1145,16 @@ void StartBulkPcBundleConversion(std::function<void(BulkConversionProgress const
 
         std::string const dest = ConvertedBundlePath(source);
         if (std::filesystem::exists(dest)) {
-          if (!force && CachedConversionIsCurrent(dest)) {
-            progress.alreadyDone++;
-            PaperLogger.info("Vivify bulk convert: '{}' already cached at '{}'", source, dest);
-            continue;
-          }
-          if (!force) {
-            PaperLogger.info("Vivify bulk convert: cached '{}' predates this converter, redoing it",
-                             dest);
-          }
-          // Forced, or cached by an older converter: drop the file so the
-          // conversion actually re-runs.
-          // ConvertToAndroid writes through a .part file and renames, so a
-          // failure after this point leaves no cached bundle rather than a
-          // truncated one -- the level falls back to being unconverted, which
-          // is the state it would have been in anyway.
-          std::error_code ec;
-          std::filesystem::remove(dest, ec);
-          if (ec) {
-            progress.failed++;
-            PaperLogger.warn("Vivify bulk convert: could not remove cached '{}' to reconvert: {}",
-                             dest, ec.message());
-            continue;
-          }
-          PaperLogger.info("Vivify bulk convert: discarded cached '{}' to reconvert", dest);
+          progress.alreadyDone++;
+          PaperLogger.info("Vivify bulk convert: '{}' already cached at '{}'", source, dest);
+          continue;
         }
 
         progress.status = level.filename().string();
         report(progress);
 
-        auto const result = RunBundleConversion(source, dest);
-        if (result.status == BundleConvert::Status::Success) {
+        auto const result = BundleConvert::ConvertToAndroid(source, dest);
+        if (result.ok()) {
           progress.converted++;
           PaperLogger.info("Vivify bulk convert: '{}' -> '{}' ({})", source, dest, result.message);
         } else if (result.status == BundleConvert::Status::AlreadyAndroid) {

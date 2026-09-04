@@ -103,18 +103,14 @@ def resource_node(size: int, seed: int) -> bytes:
 # ---------------- Bundle assembly -------------------------------------------
 def build(path, *, version=6, compression=2, block_compression=None,
           info_at_end=False, sf_version=17, target=19, block_size=0x2000,
-          n_files=2, with_resource=True, payload=4000, sf_bytes=None):
-    """sf_bytes, when given, supplies the SerializedFile payloads verbatim
-    instead of generating filler ones -- which is how a bundle carrying a real
-    Shader asset gets built for the shader-translation tests."""
+          n_files=2, with_resource=True, payload=4000):
     if block_compression is None:
         block_compression = compression
 
     nodes = []
     data = bytearray()
-    files = sf_bytes if sf_bytes is not None else [
-        serialized_file(sf_version, target, payload + i * 137) for i in range(n_files)]
-    for i, sf in enumerate(files):
+    for i in range(n_files):
+        sf = serialized_file(sf_version, target, payload + i * 137)
         nodes.append((len(data), len(sf), 4, f"CAB-{i:032x}"))
         data += sf
     if with_resource:

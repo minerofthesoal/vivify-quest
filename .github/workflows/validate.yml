@@ -45,8 +45,7 @@ jobs:
       run: |
         g++ -std=c++20 -O1 -g -fsanitize=address,undefined \
             -I include -o /tmp/conv \
-            tools/bundleconvert/main.cpp src/VivifyBundleConvert.cpp \
-            src/VivifySerializedFile.cpp src/VivifyDxbc.cpp
+            tools/bundleconvert/main.cpp src/VivifyBundleConvert.cpp
 
     - name: Round-trip and structure tests
       working-directory: tools/bundleconvert
@@ -59,85 +58,3 @@ jobs:
       env:
         VIVIFY_CONV: /tmp/conv
       run: python3 fuzz.py
-
-  texture-decoder-tests:
-    runs-on: ubuntu-latest
-    steps:
-    - name: Checkout
-      uses: actions/checkout@v4
-
-    - name: Build the BC/DXT decoder for the host, with sanitizers
-      run: |
-        g++ -std=c++20 -O1 -g -fsanitize=address,undefined \
-            -I include -o /tmp/texdec \
-            tools/texturedecode/main.cpp src/VivifyTextureDecode.cpp
-
-    - name: Decoder tests
-      run: /tmp/texdec
-
-  host-syntax-check:
-    runs-on: ubuntu-latest
-    steps:
-    - name: Checkout
-      uses: actions/checkout@v4
-
-    - name: Install clang and libc++ headers
-      run: sudo apt-get update -qq && sudo apt-get install -y -qq clang-18 libc++-18-dev libc++abi-18-dev
-
-    # Catches type, name-lookup and template errors in this project's own code
-    # without needing the Android NDK, so a mistake like calling a Runtime member
-    # from a free function is caught here rather than several CI rounds later.
-    # See the header comment in the script for what it deliberately does not cover.
-    - name: Syntax-check every source file
-      run: CLANG=clang++-18 ./scripts/host-syntax-check.sh
-
-  shader-scan-tests:
-    runs-on: ubuntu-latest
-    steps:
-    - name: Checkout
-      uses: actions/checkout@v4
-
-    - name: Install the reference lz4 library
-      # The shader-program encoder is cross-checked against real LZ4 rather than
-      # only against the decoder living beside it, so a matching pair of bugs in
-      # the two cannot pass unnoticed. A missing module fails the job on purpose.
-      run: pip install lz4
-
-    - name: Build the SerializedFile shader scanner for the host, with sanitizers
-      run: |
-        g++ -std=c++20 -O1 -g -fsanitize=address,undefined \
-            -I include -o /tmp/shaderscan \
-            tools/shaderscan/main.cpp src/VivifySerializedFile.cpp
-
-    - name: Shader scanner tests
-      run: python3 tools/shaderscan/run_tests.py /tmp/shaderscan
-
-  dxbc-translator-tests:
-    runs-on: ubuntu-latest
-    steps:
-    - name: Checkout
-      uses: actions/checkout@v4
-
-    - name: Build the DXBC translator for the host, with sanitizers
-      run: |
-        g++ -std=c++20 -O1 -g -fsanitize=address,undefined \
-            -I include -o /tmp/dxbctool \
-            tools/dxbc/main.cpp src/VivifyDxbc.cpp
-
-    - name: DXBC translator tests
-      run: python3 tools/dxbc/run_tests.py /tmp/dxbctool
-
-  report-writer-tests:
-    runs-on: ubuntu-latest
-    steps:
-    - name: Checkout
-      uses: actions/checkout@v4
-
-    - name: Build the report writer for the host, with sanitizers
-      run: |
-        g++ -std=c++20 -O1 -g -fsanitize=address,undefined \
-            -I include -o /tmp/reporttest \
-            tools/report/main.cpp src/VivifyReport.cpp
-
-    - name: Report writer tests
-      run: /tmp/reporttest

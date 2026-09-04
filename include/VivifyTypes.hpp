@@ -304,24 +304,6 @@ struct ActiveRenderSettingAnimation {
   Functions easing = Functions::EaseLinear;
 };
 enum class AssignedPrefabKind { Object, AnyDirectionObject, Debris, Trail };
-
-// Whether instantiating a replacement prefab can produce anything at all on
-// this device.
-//
-// A note prefab whose shaders no GLES driver will run draws nothing, so the
-// original note is kept visible and the spawned copy sits invisibly on top of
-// it. Doing that once is a wasted Instantiate; doing it for every note in a
-// song is thousands of them, plus a warning line each. Classifying the prefab
-// asset once lets the useless ones be skipped outright.
-enum class PrefabRenderability {
-  // At least one renderer carries a shader this GPU can actually run.
-  Renderable,
-  // Nothing draws, but the prefab still emits light or sound, so it has to be
-  // spawned anyway.
-  SideEffectsOnly,
-  // Nothing draws and nothing else happens: spawning it is pure cost.
-  Inert,
-};
 struct AssignedPrefabInfo {
   std::string asset;
   std::vector<TrackW> tracks;

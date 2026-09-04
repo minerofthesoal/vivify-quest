@@ -629,60 +629,6 @@ std::unordered_map<std::string_view, SettingType> const kRenderSettingTypes = {
     {"sun"sv, SettingType::LightPrefab},
     {"antiAliasing"sv, SettingType::Int},
     {"realtimeReflectionProbes"sv, SettingType::Bool},
-
-    // QualitySettings' shadow, LOD and particle knobs, plus the two XRSettings
-    // ones. bs-cordl does not declare any of these, so they are reached by
-    // internal-call address instead (see ResolveSettingIcall). Maps in the RSIH
-    // playlist set the five shadow keys at time 0 and every one of them was
-    // being dropped with an "unsupported setting" warning.
-    {"shadows"sv, SettingType::Int},
-    {"shadowResolution"sv, SettingType::Int},
-    {"shadowProjection"sv, SettingType::Int},
-    {"shadowCascades"sv, SettingType::Int},
-    {"shadowmaskMode"sv, SettingType::Int},
-    {"shadowDistance"sv, SettingType::Float},
-    {"shadowNearPlaneOffset"sv, SettingType::Float},
-    {"pixelLightCount"sv, SettingType::Int},
-    {"anisotropicFiltering"sv, SettingType::Int},
-    {"maximumLODLevel"sv, SettingType::Int},
-    {"particleRaycastBudget"sv, SettingType::Int},
-    {"skinWeights"sv, SettingType::Int},
-    {"lodBias"sv, SettingType::Float},
-    {"softParticles"sv, SettingType::Bool},
-    {"softVegetation"sv, SettingType::Bool},
-    {"billboardsFaceCameraPosition"sv, SettingType::Bool},
-    {"useOcclusionMesh"sv, SettingType::Bool},
-    {"occlusionMaskScale"sv, SettingType::Float},
-};
-
-// Which il2cpp class owns each setting that has to be reached by internal call.
-//
-// The property name on the C# side is the same as the key a map writes, so the
-// symbol is just "<owner>::get_<key>" / "<owner>::set_<key>".
-//
-// vSyncCount is deliberately absent even though PC Vivify exposes it: on a
-// standalone headset the compositor owns the frame cadence, and letting a map
-// change it would do far more harm than any effect it could buy.
-std::unordered_map<std::string_view, std::string_view> const kIcallSettingOwners = {
-    {"realtimeReflectionProbes"sv, "UnityEngine.QualitySettings"sv},
-    {"shadows"sv, "UnityEngine.QualitySettings"sv},
-    {"shadowResolution"sv, "UnityEngine.QualitySettings"sv},
-    {"shadowProjection"sv, "UnityEngine.QualitySettings"sv},
-    {"shadowCascades"sv, "UnityEngine.QualitySettings"sv},
-    {"shadowmaskMode"sv, "UnityEngine.QualitySettings"sv},
-    {"shadowDistance"sv, "UnityEngine.QualitySettings"sv},
-    {"shadowNearPlaneOffset"sv, "UnityEngine.QualitySettings"sv},
-    {"pixelLightCount"sv, "UnityEngine.QualitySettings"sv},
-    {"anisotropicFiltering"sv, "UnityEngine.QualitySettings"sv},
-    {"maximumLODLevel"sv, "UnityEngine.QualitySettings"sv},
-    {"particleRaycastBudget"sv, "UnityEngine.QualitySettings"sv},
-    {"skinWeights"sv, "UnityEngine.QualitySettings"sv},
-    {"lodBias"sv, "UnityEngine.QualitySettings"sv},
-    {"softParticles"sv, "UnityEngine.QualitySettings"sv},
-    {"softVegetation"sv, "UnityEngine.QualitySettings"sv},
-    {"billboardsFaceCameraPosition"sv, "UnityEngine.QualitySettings"sv},
-    {"useOcclusionMesh"sv, "UnityEngine.XR.XRSettings"sv},
-    {"occlusionMaskScale"sv, "UnityEngine.XR.XRSettings"sv},
 };
 
 bool IsLiteralColorArray(rapidjson::Value const& value) {
@@ -801,73 +747,30 @@ void Runtime::ParseAndApplyRenderSetting(std::string const& key, rapidjson::Valu
 
 namespace {
 
-// Reaches a QualitySettings/XRSettings property that bs-cordl does not declare.
-//
-// These are extern properties on the C# side, so they exist only as registered
-// internal calls. Resolving one by name gives its address directly; a name this
-// game build does not have resolves to null and the setting is then skipped,
-// which is exactly what happened before this existed -- just now it is said
-// once, by name, instead of being reported as an unsupported setting.
-void* ResolveSettingIcall(std::string const& name, bool wantSetter) {
-  auto ownerIt = kIcallSettingOwners.find(std::string_view(name));
-  if (ownerIt == kIcallSettingOwners.end()) return nullptr;
+using QualityBoolSetter = void (*)(bool);
+using QualityBoolGetter = bool (*)();
 
-  std::string const symbol =
-      fmt::format("{}::{}_{}", ownerIt->second, wantSetter ? "set" : "get", name);
-
-  static std::unordered_map<std::string, void*> resolved;
-  if (auto it = resolved.find(symbol); it != resolved.end()) return it->second;
-
-  auto* fn = reinterpret_cast<void*>(il2cpp_functions::resolve_icall(symbol.c_str()));
-  resolved.emplace(symbol, fn);
-  if (fn == nullptr) {
-    PaperLogger.warn("Vivify SetRenderingSettings: '{}' is not present in this game build, "
-                     "so that setting is ignored", symbol);
-  } else if (GetVivifyDebugLogging()) {
-    PaperLogger.info("Vivify SetRenderingSettings: resolved '{}'", symbol);
-  }
-  return fn;
+QualityBoolSetter RealtimeReflectionProbesSetter() {
+  static auto* setter = reinterpret_cast<QualityBoolSetter>(
+      il2cpp_functions::resolve_icall("UnityEngine.QualitySettings::set_realtimeReflectionProbes"));
+  return setter;
 }
 
-bool TrySetSettingViaIcall(std::string const& name, int val) {
-  auto* fn = ResolveSettingIcall(name, true);
-  if (fn == nullptr) return false;
-  reinterpret_cast<void (*)(int)>(fn)(val);
-  return true;
+QualityBoolGetter RealtimeReflectionProbesGetter() {
+  static auto* getter = reinterpret_cast<QualityBoolGetter>(
+      il2cpp_functions::resolve_icall("UnityEngine.QualitySettings::get_realtimeReflectionProbes"));
+  return getter;
 }
 
-bool TrySetSettingViaIcall(std::string const& name, float val) {
-  auto* fn = ResolveSettingIcall(name, true);
-  if (fn == nullptr) return false;
-  reinterpret_cast<void (*)(float)>(fn)(val);
-  return true;
-}
-
-bool TrySetSettingViaIcall(std::string const& name, bool val) {
-  auto* fn = ResolveSettingIcall(name, true);
-  if (fn == nullptr) return false;
-  reinterpret_cast<void (*)(bool)>(fn)(val);
-  return true;
-}
-
-// Reads the device's current value so RestoreRenderSettings can put it back
-// when the level ends. The kind decides how the return value is interpreted,
-// which is safe because the kind comes from the same table that decided how to
-// write it.
-std::optional<std::variant<float, UnityEngine::Color, int, bool, UnityEngine::Material*, UnityEngine::Light*>>
-ReadSettingViaIcall(std::string const& name, RenderSettingKind kind) {
-  auto* fn = ResolveSettingIcall(name, false);
-  if (fn == nullptr) return std::nullopt;
-  switch (kind) {
-    case RenderSettingKind::Int:
-      return reinterpret_cast<int (*)()>(fn)();
-    case RenderSettingKind::Float:
-      return reinterpret_cast<float (*)()>(fn)();
-    case RenderSettingKind::Bool:
-      return reinterpret_cast<bool (*)()>(fn)();
-    default:
-      return std::nullopt;
-  }
+void LogRealtimeReflectionProbesIcallOnce() {
+  static bool logged = false;
+  if (logged) return;
+  logged = true;
+  auto* setter = RealtimeReflectionProbesSetter();
+  auto* getter = RealtimeReflectionProbesGetter();
+  PaperLogger.info("Vivify realtimeReflectionProbes icall: setter={} getter={} deviceDefault={}",
+                   setter != nullptr, getter != nullptr,
+                   getter != nullptr ? (getter() ? "on" : "off") : "?");
 }
 
 void RawApplyRenderSettingFloat(std::string const& name, float val) {
@@ -879,7 +782,6 @@ void RawApplyRenderSettingFloat(std::string const& name, float val) {
   else if (name == "haloStrength") UnityEngine::RenderSettings::set_haloStrength(val);
   else if (name == "flareStrength") UnityEngine::RenderSettings::set_flareStrength(val);
   else if (name == "flareFadeSpeed") UnityEngine::RenderSettings::set_flareFadeSpeed(val);
-  else TrySetSettingViaIcall(name, val);
 }
 void RawApplyRenderSettingColor(std::string const& name, UnityEngine::Color val) {
   if (name == "fogColor") UnityEngine::RenderSettings::set_fogColor(val);
@@ -891,7 +793,10 @@ void RawApplyRenderSettingColor(std::string const& name, UnityEngine::Color val)
 }
 void RawApplyRenderSettingBool(std::string const& name, bool val) {
   if (name == "fog") UnityEngine::RenderSettings::set_fog(val);
-  else TrySetSettingViaIcall(name, val);
+  else if (name == "realtimeReflectionProbes") {
+    LogRealtimeReflectionProbesIcallOnce();
+    if (auto* setter = RealtimeReflectionProbesSetter()) setter(val);
+  }
 }
 void RawApplyRenderSettingInt(std::string const& name, int val) {
   if (name == "antiAliasing") UnityEngine::QualitySettings::set_antiAliasing(val);
@@ -900,7 +805,6 @@ void RawApplyRenderSettingInt(std::string const& name, int val) {
   else if (name == "defaultReflectionMode") UnityEngine::RenderSettings::set_defaultReflectionMode(static_cast<UnityEngine::Rendering::DefaultReflectionMode>(val));
   else if (name == "defaultReflectionResolution") UnityEngine::RenderSettings::set_defaultReflectionResolution(val);
   else if (name == "reflectionBounces") UnityEngine::RenderSettings::set_reflectionBounces(val);
-  else TrySetSettingViaIcall(name, val);
 }
 void RawApplySavedRenderSetting(SavedRenderSetting const& s) {
   switch (s.kind) {
@@ -960,9 +864,10 @@ void Runtime::SaveRenderSetting(std::string const& name, RenderSettingKind kind)
   else if (name == "skybox") saved.saved = UnityEngine::RenderSettings::get_skybox().unsafePtr();
   else if (name == "sun") saved.saved = UnityEngine::RenderSettings::get_sun().unsafePtr();
   else if (name == "antiAliasing") saved.saved = UnityEngine::QualitySettings::get_antiAliasing();
-  else if (auto current = ReadSettingViaIcall(name, kind); current.has_value()) saved.saved = *current;
-  // Nothing knows how to read this one back, so nothing may write it either --
-  // a setting that cannot be restored would leak into the next level.
+  else if (name == "realtimeReflectionProbes") {
+    auto* getter = RealtimeReflectionProbesGetter();
+    saved.saved = getter != nullptr ? getter() : false;
+  }
   else return;
   _savedRenderSettings.push_back(std::move(saved));
 }

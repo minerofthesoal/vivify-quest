@@ -1,10 +1,8 @@
 #include "main.hpp"
 #include "VivifyRuntime.hpp"
-#include "VivifyReport.hpp"
 #include <string>
 #include <string_view>
 #include <fstream>
-#include <chrono>
 #include <mutex>
 #include <filesystem>
 #include "HMUI/ViewController.hpp"
@@ -34,9 +32,6 @@ constexpr std::string_view kDisableVisualsInMultiplayerConfigKey = "disableVisua
 constexpr std::string_view kDisableVRCenterAdjustConfigKey = "disableVRCenterAdjust";
 constexpr std::string_view kConvertPcBundlesOnDeviceConfigKey = "convertPcBundlesOnDevice";
 constexpr std::string_view kStandInShadingConfigKey = "standInShading";
-constexpr std::string_view kSubmitScoresConfigKey = "submitScoresOnVivifyMaps";
-constexpr std::string_view kTranslateShadersConfigKey = "translateShadersOnConversion";
-constexpr std::string_view kStandInShaderNameConfigKey = "standInShaderName";
 bool gMultipassRenderingEnabled = true;
 bool gVivifyDebugLogging = false;
 bool gDisableBeat0FilmgrainBlit = false;
@@ -61,50 +56,12 @@ bool gConvertPcBundlesOnDevice = true;
 // white. Turning this off leaves such meshes undrawn instead, which also means
 // notes and sabers keep the game's own visuals rather than a white stand-in.
 bool gStandInShading = true;
-// Vivify does not change note timing, scoring, or anything else a leaderboard
-// cares about -- it changes how a map looks. Submission was nevertheless being
-// turned off for every map carrying the Vivify requirement, and with it off
-// BeatLeader and ScoreSaber record no replay, so Vivify maps had no replays to
-// watch or render at all.
-bool gSubmitScores = true;
-// On-device conversion now cross-compiles a PC bundle's DirectX shader programs
-// to GLSL ES (VivifyDxbc) rather than only retargeting the archive, so a
-// converted map can render its own shading instead of a stand-in. A shader
-// using anything outside the translated subset is left exactly as it was, so
-// the worst case is the behaviour this replaces. Turning this off falls back to
-// the retarget-only conversion, which is the escape hatch if a translated
-// bundle turns out worse than an unshaded one -- no new build required, just
-// reconvert.
-bool gTranslateShaders = true;
-// Which shader to use as the stand-in, by name, overriding the automatic pick.
-//
-// Empty means "choose automatically". This exists because the right answer
-// depends on what a particular Beat Saber build actually ships, and that list
-// is only knowable from a headset: several builds shipped with a stand-in that
-// turned out to render black on the device. The session log prints every
-// runnable shader name, so a name from that list can be dropped in here and
-// tried immediately rather than waiting for another build.
-std::string gStandInShaderName;
 
-// Both diagnostic files live beside the mod's own data, and both are .txt.
-//
-// This used to be Logs/Vivify.log. A .log file has no default handler on Android
-// or Windows, so tapping it does nothing and it looks like no log exists at all
-// -- and it sat in a different directory from the per-level report, so there
-// were two places to look. One directory, two .txt files, both openable.
-constexpr std::string_view kVivifyLogDir = "/sdcard/ModData/com.beatgames.beatsaber/Mods/Vivify";
-constexpr std::string_view kVivifyLogPath =
-    "/sdcard/ModData/com.beatgames.beatsaber/Mods/Vivify/VivifySession.txt";
-
-// A session log must not fill a headset, and it is truncated at launch anyway,
-// so this only has to bound one play session.
-constexpr std::streamoff kVivifyLogMaxBytes = 8 * 1024 * 1024;
-
+constexpr std::string_view kVivifyLogDir = "/sdcard/ModData/com.beatgames.beatsaber/Logs";
+constexpr std::string_view kVivifyLogPath = "/sdcard/ModData/com.beatgames.beatsaber/Logs/Vivify.log";
 std::ofstream gVivifyLogFile;
 std::mutex gVivifyLogMutex;
 bool gVivifyLogSinkInstalled = false;
-bool gVivifyLogCapped = false;
-std::chrono::steady_clock::time_point gVivifyLogLastFlush{};
 
 void InstallVivifyFileLogSink() {
   if (gVivifyLogSinkInstalled) return;
@@ -119,34 +76,13 @@ void InstallVivifyFileLogSink() {
   }
   gVivifyLogFile << "=== Vivify " << VERSION << " session log ===\n";
   gVivifyLogFile.flush();
-  gVivifyLogLastFlush = std::chrono::steady_clock::now();
 
   Paper::Logger::AddLogSink([](Paper::LogData const& data) {
     if (!data.tag.has_value() || *data.tag != std::string_view(MOD_ID)) return;
     std::lock_guard<std::mutex> lock(gVivifyLogMutex);
-    if (!gVivifyLogFile.is_open() || gVivifyLogCapped) return;
-
+    if (!gVivifyLogFile.is_open()) return;
     gVivifyLogFile << '[' << Paper::format_as(data.level) << "] " << data.message << '\n';
-
-    if (gVivifyLogFile.tellp() > kVivifyLogMaxBytes) {
-      gVivifyLogFile << "=== log capped at " << (kVivifyLogMaxBytes / (1024 * 1024))
-                     << "MB; further lines go to logcat only ===\n";
-      gVivifyLogFile.flush();
-      gVivifyLogCapped = true;
-      return;
-    }
-
-    // Flushing every line meant an sdcard write per log line, on whichever
-    // thread logged -- including the main thread mid-gameplay, where Vivify can
-    // be noisy. Warnings and errors still flush immediately, because those are
-    // the lines that matter if the game stops before the buffer is written;
-    // ordinary lines are flushed at most a few times a second.
-    auto const now = std::chrono::steady_clock::now();
-    bool const important = data.level >= Paper::LogLevel::WRN;
-    if (important || now - gVivifyLogLastFlush > std::chrono::milliseconds(250)) {
-      gVivifyLogFile.flush();
-      gVivifyLogLastFlush = now;
-    }
+    gVivifyLogFile.flush();
   });
 }
 
@@ -155,29 +91,6 @@ void EnsureConfigObject() {
   if (!doc.IsObject()) {
     doc.SetObject();
   }
-}
-
-// The string equivalent of EnsureBoolConfigValue, for settings whose value is a
-// name rather than a switch.
-bool EnsureStringConfigValue(std::string_view key, std::string const& defaultValue,
-                             std::string& value) {
-  auto& doc = getConfig().config;
-  auto it = doc.FindMember(key.data());
-  if (it != doc.MemberEnd() && it->value.IsString()) {
-    value.assign(it->value.GetString(), it->value.GetStringLength());
-    return false;
-  }
-
-  auto& allocator = doc.GetAllocator();
-  value = defaultValue;
-  rapidjson::Value stored(defaultValue.c_str(), static_cast<rapidjson::SizeType>(defaultValue.size()),
-                          allocator);
-  if (it == doc.MemberEnd()) {
-    doc.AddMember(rapidjson::Value(key.data(), allocator), stored, allocator);
-  } else {
-    it->value = stored;
-  }
-  return true;
 }
 
 bool EnsureBoolConfigValue(std::string_view key, bool defaultValue, bool& value) {
@@ -198,24 +111,7 @@ bool EnsureBoolConfigValue(std::string_view key, bool defaultValue, bool& value)
   return true;
 }
 
-// True only while the settings view controller is being constructed.
-//
-// BSML toggles are live the moment they exist, and a toggle that fires its
-// change callback while it is still being set up writes that transient value
-// straight through to the config file -- which is how "Stand-In Shading" went
-// from on to off mid-session without anybody touching it, and with it every
-// converted map's geometry stopped being repaired. A player cannot tap a
-// control that is not on screen yet, so any change arriving in this window is
-// construction noise and is dropped.
-bool gSettingsMenuBuilding = false;
-
 void SetBoolConfigValue(std::string_view key, bool enabled, bool& value) {
-  if (gSettingsMenuBuilding) {
-    PaperLogger.info("Vivify settings: ignoring a '{}' change to {} that arrived while the menu was "
-                     "still being built",
-                     key, enabled ? "on" : "off");
-    return;
-  }
   auto& config = getConfig();
   auto& doc = config.config;
   EnsureConfigObject();
@@ -246,37 +142,8 @@ void RegisterModSettings() {
   BSML::BSMLSettings::get_instance()->TryAddSettingsMenu(
       [](HMUI::ViewController* viewController, bool firstActivation, bool, bool) {
         if (!firstActivation || viewController == nullptr) return;
-        gSettingsMenuBuilding = true;
-        // Cleared however this scope is left, including through the catch below.
-        struct BuildGuard {
-          ~BuildGuard() { gSettingsMenuBuilding = false; }
-        } buildGuard;
-
-        // The whole menu is built inside a try/catch because it is built inside
-        // a callback the game invokes: anything that throws here abandons the
-        // rest of the construction and leaves the settings tab wedged, with the
-        // game still running around it. That is exactly what the version label
-        // added in 0.9.2 did -- it was the first widget in the list, so when it
-        // threw, every control after it simply never existed and the menu could
-        // not be used at all.
-        //
-        // A failure now costs the widgets after it and says so in the log,
-        // instead of costing the menu.
-        try {
         auto* container = BSML::Lite::CreateScrollableSettingsContainer(viewController->get_transform());
         if (container == nullptr) return;
-
-        // Which build is actually running, in the headset, without a file.
-        // "the new features do not work" and "the new build did not install"
-        // look identical from the outside, and a version number here separates
-        // them in one glance.
-        //
-        // Built as a StringW from a std::string, the way every other text in
-        // this menu is: the std::u16string this used to assemble by hand is
-        // what took the menu down.
-        BSML::Lite::CreateText(container->get_transform(),
-                               StringW(std::string("Vivify ") + VERSION));
-
         BSML::Lite::CreateToggle(
             container->get_transform(), u"Debug logging", GetVivifyDebugLogging(),
             [](bool value) { SetBoolConfigValue(kVivifyDebugLoggingConfigKey, value, gVivifyDebugLogging); });
@@ -310,16 +177,6 @@ void RegisterModSettings() {
             GetStandInShading(),
             [](bool value) { SetBoolConfigValue(kStandInShadingConfigKey, value, gStandInShading); });
 
-        BSML::Lite::CreateToggle(
-            container->get_transform(), u"Translate Shaders On Conversion",
-            GetTranslateShadersOnConversion(),
-            [](bool value) { SetBoolConfigValue(kTranslateShadersConfigKey, value, gTranslateShaders); });
-
-        BSML::Lite::CreateToggle(
-            container->get_transform(), u"Submit Scores On Vivify Maps",
-            GetSubmitScoresOnVivifyMaps(),
-            [](bool value) { SetBoolConfigValue(kSubmitScoresConfigKey, value, gSubmitScores); });
-
         // A map whose only asset bundle is a PC build has its play button
         // disabled, so it can never be selected into -- which also means the
         // per-level conversion that runs on level select can never fire for it.
@@ -327,52 +184,19 @@ void RegisterModSettings() {
         // those levels become playable without having to be playable first.
         gConvertStatusText = BSML::Lite::CreateText(container->get_transform(), u"Idle");
         if (Vivify::IsBulkPcBundleConversionRunning()) SetConvertStatusText("Converting...");
-        // One progress callback for both buttons; they differ only in whether an
-        // already-cached conversion is reused or thrown away first.
-        static auto const startConversion = [](bool force) {
-          if (Vivify::IsBulkPcBundleConversionRunning()) return;
-          SetConvertStatusText(force ? "Reconverting..." : "Scanning...");
-          Vivify::StartBulkPcBundleConversion(
-              [](Vivify::BulkConversionProgress const& progress) {
+        BSML::Lite::CreateUIButton(
+            container->get_transform(), u"Convert All PC Bundles Now", []() {
+              if (Vivify::IsBulkPcBundleConversionRunning()) return;
+              SetConvertStatusText("Scanning...");
+              Vivify::StartBulkPcBundleConversion([](Vivify::BulkConversionProgress const& progress) {
                 if (progress.finished) {
                   SetConvertStatusText(progress.status);
                   return;
                 }
                 SetConvertStatusText(std::to_string(progress.levelsScanned) + "/" +
                                      std::to_string(progress.levelsTotal) + "  " + progress.status);
-              },
-              force);
-        };
-
-        BSML::Lite::CreateUIButton(
-            container->get_transform(), u"Convert All PC Bundles Now",
-            []() { startConversion(false); });
-
-        // A cached conversion is keyed on the source bundle, so it is reused
-        // even after the converter itself has been fixed. This is the way to
-        // pick those fixes up without deleting the cache directory by hand.
-        BSML::Lite::CreateUIButton(
-            container->get_transform(), u"Force Reconvert All (ignore cache)",
-            []() { startConversion(true); });
-
-        // paperlog output is not reachable without adb, so Vivify writes its own
-        // plain-text report next to its data. Showing the path here means the
-        // file can be found without being told where to look.
-        BSML::Lite::CreateText(container->get_transform(),
-                               u"Diagnostics (both plain .txt, same folder):");
-        BSML::Lite::CreateText(
-            container->get_transform(),
-            StringW("<size=70%>" + Vivify::Report::FilePath() + "</size>"));
-        BSML::Lite::CreateText(
-            container->get_transform(),
-            StringW("<size=70%>" + std::string(kVivifyLogPath) + "</size>"));
-        } catch (std::exception const& e) {
-          PaperLogger.error("Vivify settings menu: construction threw ({}); the controls after the "
-                            "failure are missing", e.what());
-        } catch (...) {
-          PaperLogger.error("Vivify settings menu: construction threw; the controls after the "
-                            "failure are missing");
-        }
+              });
+            });
       },
       "Vivify", false);
 }
@@ -439,18 +263,6 @@ bool GetStandInShading() {
   return gStandInShading;
 }
 
-bool GetSubmitScoresOnVivifyMaps() {
-  return gSubmitScores;
-}
-
-bool GetTranslateShadersOnConversion() {
-  return gTranslateShaders;
-}
-
-std::string GetStandInShaderName() {
-  return gStandInShaderName;
-}
-
 void EnsureConfigDefaults() {
   auto& config = getConfig();
   auto& doc = config.config;
@@ -468,10 +280,6 @@ void EnsureConfigDefaults() {
   needsWrite |= EnsureBoolConfigValue(kDisableVRCenterAdjustConfigKey, false, gDisableVRCenterAdjust);
   needsWrite |= EnsureBoolConfigValue(kConvertPcBundlesOnDeviceConfigKey, true, gConvertPcBundlesOnDevice);
   needsWrite |= EnsureBoolConfigValue(kStandInShadingConfigKey, true, gStandInShading);
-  needsWrite |= EnsureBoolConfigValue(kSubmitScoresConfigKey, true, gSubmitScores);
-  needsWrite |= EnsureBoolConfigValue(kTranslateShadersConfigKey, true, gTranslateShaders);
-  needsWrite |= EnsureStringConfigValue(kStandInShaderNameConfigKey, std::string(),
-                                        gStandInShaderName);
   if (needsWrite) {
     config.Write();
   }

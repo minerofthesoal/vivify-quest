@@ -18,7 +18,6 @@ import argparse
 import io
 import json
 import pathlib
-import re
 import shutil
 import sys
 import tarfile
@@ -62,49 +61,21 @@ def extract_headers_from_local(dep: dict, includes: pathlib.Path) -> bool:
     print(f"  headers  {dep_id:<26} (bundled locally)")
     return True
 
-def library_file_name(dep: dict) -> str:
-    """The file name a dependency's native library is stored under.
-
-    Must agree between the local-bundle check and the download, or the two
-    disagree about whether a library is already present. overrideSoName lives at
-    the top level of a manifest entry; it was previously read from a nested
-    "additionalData" key that the manifest never had, so this always fell
-    through to the guess below. That guess turns hyphens into underscores, so
-    for every hyphenated id (beatsaber-hook, custom-types, web-utils, ...) it
-    looked for a file that does not exist and re-downloaded a library already
-    sitting in extern/libs.
-    """
-    override = dep.get("overrideSoName") or (dep.get("additionalData") or {}).get("overrideSoName")
-    if override:
-        return override
-    url = dep.get("soLink")
-    if url:
-        return url.rsplit("/", 1)[-1]
-    return f"lib{dep['id'].replace('-', '_')}.so"
-
-
 def extract_library_from_local(dep: dict, libs: pathlib.Path) -> bool:
-    """Use a library already bundled in extern/libs, if there is one."""
+    """Check if library is already bundled locally and copy it."""
     dep_id = dep["id"]
-    lib_name = library_file_name(dep)
+    additional_data = dep.get("additionalData", {})
+    lib_name = additional_data.get("overrideSoName", f"lib{dep_id.replace('-', '_')}.so")
+    
     local_lib_path = ROOT / "extern" / "libs" / lib_name
-
-    if not local_lib_path.exists():
-        return False
-
-    destination = libs / lib_name
-
-    # In the vendored layout the bundled library already sits exactly where it
-    # is wanted, so source and destination are the same file and copy2 raises
-    # SameFileError. Nothing needs doing in that case.
-    if local_lib_path.resolve() == destination.resolve():
-        print(f"  library  {dep_id:<26} {lib_name} (bundled locally, already in place)")
+    
+    if local_lib_path.exists():
+        destination = libs / lib_name
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(local_lib_path, destination)
+        print(f"  library  {dep_id:<26} {lib_name} (bundled locally)")
         return True
-
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(local_lib_path, destination)
-    print(f"  library  {dep_id:<26} {lib_name} (bundled locally)")
-    return True
+    return False
 
 def extract_headers_from_github(dep: dict, includes: pathlib.Path) -> None:
     """Download <repo> at <ref> from GitHub and unpack it to includes/<id>/."""
@@ -118,13 +89,6 @@ def extract_headers_from_github(dep: dict, includes: pathlib.Path) -> None:
         shutil.rmtree(destination)
     destination.mkdir(parents=True)
 
-    unpack_github_tarball(blob, destination, dep_id)
-
-    extract_submodules(dep, destination)
-
-
-def unpack_github_tarball(blob: bytes, destination: pathlib.Path, label: str) -> None:
-    """Unpack a GitHub source tarball into destination, stripping its root dir."""
     with tarfile.open(fileobj=io.BytesIO(blob), mode="r:gz") as archive:
         members = archive.getmembers()
         # GitHub wraps the tree in a single <repo>-<ref> directory; strip it so
@@ -139,7 +103,7 @@ def unpack_github_tarball(blob: bytes, destination: pathlib.Path, label: str) ->
             # Refuse anything that would escape the destination directory.
             target = (destination / relative).resolve()
             if not str(target).startswith(str(destination.resolve())):
-                raise RuntimeError(f"{label}: archive entry escapes destination: {member.name}")
+                raise RuntimeError(f"{dep_id}: archive entry escapes destination: {member.name}")
             if member.isdir():
                 target.mkdir(parents=True, exist_ok=True)
             elif member.isreg():
@@ -147,38 +111,6 @@ def unpack_github_tarball(blob: bytes, destination: pathlib.Path, label: str) ->
                 source = archive.extractfile(member)
                 if source is not None:
                     target.write_bytes(source.read())
-
-
-def extract_submodules(dep: dict, destination: pathlib.Path) -> None:
-    """Fetch the git submodules a dependency's headers include from.
-
-    A GitHub source tarball contains no submodule content -- the submodule path
-    is simply absent from the archive. qpm never hit this because a qpackages
-    package is zipped from a full checkout, submodules and all, so two headers
-    this project includes unconditionally had nothing behind them:
-
-        beatsaber-hook/shared/config/rapidjson-utils.hpp
-            #include "../rapidjson/include/rapidjson/rapidjson.h"   (Tencent/rapidjson)
-        paper2_scotland2/shared/string_convert.hpp
-            #include <utf8/cpp11.h>                                 (nemtrif/utfcpp)
-
-    Each entry names the upstream repo and the exact commit the dependency
-    pins -- read off its own .gitmodules and the gitlink in its tree -- so the
-    restored layout matches what a `git clone --recursive` would produce.
-    """
-    for submodule in dep.get("submodules") or []:
-        repo, ref, path = submodule["repo"], submodule["ref"], submodule["path"]
-        url = f"https://github.com/{repo}/archive/{ref}.tar.gz"
-        label = f"{dep['id']}/{path}"
-        target = destination / path
-        # A dependency restored from qpackages.com, or vendored in place, already
-        # carries its submodule content; only the GitHub tarball path leaves the
-        # directory missing or empty.
-        if target.is_dir() and any(target.iterdir()):
-            continue
-        print(f"  submod   {label:<26} {repo}@{ref[:12]} (GitHub)")
-        target.mkdir(parents=True, exist_ok=True)
-        unpack_github_tarball(fetch(url), target, label)
 
 
 def extract_headers_from_qpackages(dep: dict, includes: pathlib.Path) -> None:
@@ -281,7 +213,6 @@ def extract_headers(dep: dict, includes: pathlib.Path, allow_qpackages: bool = T
     """
     # First try local bundled packages
     if extract_headers_from_local(dep, includes):
-        extract_submodules(dep, includes / dep["id"])
         return
 
     # Then try GitHub if repo/ref specified
@@ -299,21 +230,9 @@ def extract_headers(dep: dict, includes: pathlib.Path, allow_qpackages: bool = T
 
     # Fall back to qpackages.com
     extract_headers_from_qpackages(dep, includes)
-    extract_submodules(dep, includes / dep["id"])
 
 
 def download_library(dep: dict, libs: pathlib.Path) -> None:
-    # A headers-only dependency contributes no library, and placing one anyway is
-    # not a harmless extra file: extern.cmake links every .so in extern/libs, so
-    # it becomes a DT_NEEDED entry in libVivify.so and the mod fails to dlopen on
-    # a device that (correctly) does not have it. config-utils is exactly this --
-    # qpm resolves it headersOnly, and the overrideSoName in qpm.shared.json names
-    # the repo's *test* binary, libconfig-utils_test.so.
-    if dep.get("headersOnly"):
-        if dep.get("soLink"):
-            print(f"  skip lib {dep['id']:<26} headersOnly, ignoring soLink")
-        return
-
     # First try local bundled libraries
     if extract_library_from_local(dep, libs):
         return
@@ -321,86 +240,9 @@ def download_library(dep: dict, libs: pathlib.Path) -> None:
     url = dep.get("soLink")
     if not url:
         return
-    name = library_file_name(dep)
-    print(f"  library  {dep['id']:<26} {name} (GitHub)")
+    name = dep.get("overrideSoName") or url.rsplit("/", 1)[-1]
+    print(f"  library  {dep['id']:<26} {name}")
     (libs / name).write_bytes(fetch(url))
-
-
-def project_version() -> str:
-    """The mod version qpm.json declares, which qpm_defines.cmake must mirror."""
-    return str(json.loads((ROOT / "qpm.json").read_text())["info"]["version"])
-
-
-def declared_include_paths(dep: dict):
-    """Every include directory the manifest promises this dependency provides."""
-    options = dep.get("compileOptions") or {}
-    for path in options.get("includePaths", []):
-        yield "includePaths", path
-    for path in options.get("systemIncludes", []):
-        yield "systemIncludes", path
-
-
-def verify_include_paths(manifest: dict, includes: pathlib.Path) -> list:
-    """Check that every declared include directory actually landed on disk.
-
-    A path that does not exist is silently accepted by CMake and only surfaces
-    much later as a pile of "file not found" compiler errors, which is how a
-    stale "fmt/include/" (the qpm wrapper layout, one "fmt/" too many) survived
-    in this manifest. Fail at restore time instead, naming the directory.
-    """
-    missing = []
-    for dep in manifest["dependencies"]:
-        for key, path in declared_include_paths(dep):
-            candidate = includes / dep["id"] / path
-            if not candidate.is_dir():
-                missing.append(f"{dep['id']} {key} '{path}' -> {candidate} does not exist")
-        # A submodule directory that exists but is empty is the shape a GitHub
-        # source tarball leaves behind, and it fails the same silent way: the
-        # relative #include inside the dependency's own headers resolves to
-        # nothing until the compiler reaches it.
-        for submodule in dep.get("submodules") or []:
-            candidate = includes / dep["id"] / submodule["path"]
-            if not candidate.is_dir() or not any(candidate.iterdir()):
-                missing.append(
-                    f"{dep['id']} submodule '{submodule['path']}' ({submodule['repo']}) -> {candidate} is missing or empty")
-    return missing
-
-
-def verify_libraries(manifest: dict, libs: pathlib.Path) -> list:
-    """Check extern/libs against the manifest, in both directions.
-
-    Every .so here is linked into the mod and becomes a DT_NEEDED entry, so a
-    stray one is a load failure on device rather than dead weight -- and a
-    missing one is a link error. Both are worth catching at restore time.
-    """
-    expected = {library_file_name(dep) for dep in manifest["dependencies"]
-                if not dep.get("headersOnly") and dep.get("soLink")}
-    present = {path.name for path in libs.glob("*.so")}
-    problems = []
-    for name in sorted(expected - present):
-        problems.append(f"missing library {name}")
-    for name in sorted(present - expected):
-        problems.append(f"unexpected library {name} in {libs} "
-                        f"(it would become a DT_NEEDED entry no device can satisfy)")
-    return problems
-
-
-def sync_mod_version(manifest_version: str) -> None:
-    """Keep MOD_VERSION in qpm_defines.cmake in step with qpm.json.
-
-    qpm normally rewrites that file on restore. This script replaces qpm, so
-    without this the compiled binary keeps reporting whatever version was
-    current the last time qpm ran (0.4.2, long after qpm.json reached 0.8.2).
-    """
-    defines = ROOT / "qpm_defines.cmake"
-    if not defines.exists():
-        return
-    text = defines.read_text()
-    updated, count = re.subn(r'set\(MOD_VERSION "[^"]*"\)',
-                             f'set(MOD_VERSION "{manifest_version}")', text, count=1)
-    if count and updated != text:
-        defines.write_text(updated)
-        print(f"  version  qpm_defines.cmake MOD_VERSION -> {manifest_version}")
 
 
 def generate_extern_cmake(manifest: dict) -> str:
@@ -475,16 +317,6 @@ def main() -> int:
         print(f"  GitHub sources: {github_deps}")
         print(f"  qpackages.com fallback: {len(needs_registry)}")
         print(f"Native libraries: {sum(1 for d in dependencies if d.get('soLink'))}")
-        extern_dir = ROOT / manifest.get("externDir", "extern")
-        includes = extern_dir / "includes"
-        if includes.is_dir():
-            missing = verify_include_paths(manifest, includes)
-            if (extern_dir / "libs").is_dir():
-                missing += verify_libraries(manifest, extern_dir / "libs")
-            for entry in missing:
-                print(f"error: {entry}", file=sys.stderr)
-            if missing:
-                return 1
         if args.no_qpackages and needs_registry:
             print("\nerror: --no-qpackages, but these have no GitHub repo/ref:", file=sys.stderr)
             for dep_id in needs_registry:
@@ -513,23 +345,13 @@ def main() -> int:
             download_library(dep, libs)
         except (urllib.error.URLError, urllib.error.HTTPError, RuntimeError, tarfile.TarError, OSError) as error:
             failures.append(f"{dep['id']}: {error}")
-            print(f"  FAILED   {dep['id']:<26} {error}", flush=True)
+            print(f"  FAILED   {dep['id']:<26} {error}", file=sys.stderr)
 
     if failures:
         print(f"\n{len(failures)} dependency/dependencies failed to restore.", file=sys.stderr)
         return 1
 
-    missing = verify_include_paths(manifest, includes) + verify_libraries(manifest, libs)
-    if missing:
-        print("\nerror: restored dependency tree does not match the manifest:", file=sys.stderr)
-        for entry in missing:
-            print(f"  - {entry}", file=sys.stderr)
-        print("Fix the paths in scripts/dependencies.json to match the restored layout.",
-              file=sys.stderr)
-        return 1
-
     (ROOT / "extern.cmake").write_text(generate_extern_cmake(manifest))
-    sync_mod_version(project_version())
     print(f"\nRestored {len(dependencies)} dependencies into {extern} and regenerated extern.cmake.")
     return 0
 

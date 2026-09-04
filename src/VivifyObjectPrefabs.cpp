@@ -1,8 +1,6 @@
 #include "VivifyRuntimeInternal.hpp"
 #include "VivifyComponents.hpp"
 #include "GlobalNamespace/ColorNoteVisuals.hpp"
-#include "UnityEngine/AudioSource.hpp"
-#include "UnityEngine/Canvas.hpp"
 #include <exception>
 
 namespace Vivify {
@@ -145,73 +143,6 @@ void Runtime::ClearAssignedPrefabs(std::string_view objectType, std::optional<As
       _assignedPrefabs.end());
 }
 
-// Answers "would spawning this prefab put anything on screen (or in the mix)?"
-// exactly once per asset.
-//
-// The materials are repaired first, because the answer depends on the repair:
-// a shader with no GLES program may still end up drawable once a stand-in has
-// been substituted for it. RepairGameObjectMaterials already ran over every
-// loaded prefab at level load and remembers what it has seen, so calling it
-// here is a no-op in the normal case and a correctness guard if this asset
-// arrived some other way.
-//
-// The prefab asset is inspected rather than a spawned copy: an instance shares
-// its materials with the asset it came from, so the verdict is the same, and
-// checking the asset means never having to spawn anything to find out.
-PrefabRenderability Runtime::EvaluatePrefabRenderability(std::string_view asset) {
-  auto key = NormalizeAssetKey(asset);
-  if (auto it = _prefabRenderability.find(key); it != _prefabRenderability.end()) {
-    return it->second;
-  }
-
-  auto* prefab = GetAssetAs<UnityEngine::GameObject>(asset);
-  // An asset that is not a prefab at all is somebody else's problem; say
-  // "renderable" so nothing here changes how it is handled.
-  if (!IsManagedAlive(prefab)) return PrefabRenderability::Renderable;
-
-  RepairGameObjectMaterials(prefab, asset);
-
-  bool renderable = false;
-  auto renderers = prefab->GetComponentsInChildren<UnityEngine::Renderer*>(true);
-  for (int i = 0; i < renderers.size() && !renderable; i++) {
-    auto* renderer = renderers[i];
-    if (!IsManagedAlive(renderer)) continue;
-    auto materials = renderer->get_sharedMaterials();
-    if (!materials) continue;
-    for (int j = 0; j < materials.size(); j++) {
-      auto* material = materials[j].unsafePtr();
-      if (!IsManagedAlive(material)) continue;
-      auto* shader = material->get_shader().unsafePtr();
-      if (IsManagedAlive(shader) && shader->get_isSupported()) {
-        renderable = true;
-        break;
-      }
-    }
-  }
-
-  PrefabRenderability verdict = PrefabRenderability::Renderable;
-  if (!renderable) {
-    // Renderers are not the only way a prefab is noticed. A light still lights
-    // the scene and an audio source is still audible with nothing drawn, so
-    // those have to be spawned even though they are invisible. Everything else
-    // needs a renderer to reach the player.
-    auto lights = prefab->GetComponentsInChildren<UnityEngine::Light*>(true);
-    auto audio = prefab->GetComponentsInChildren<UnityEngine::AudioSource*>(true);
-    auto canvases = prefab->GetComponentsInChildren<UnityEngine::Canvas*>(true);
-    bool const hasSideEffects = (lights && lights.size() > 0) || (audio && audio.size() > 0) ||
-                                (canvases && canvases.size() > 0);
-    verdict = hasSideEffects ? PrefabRenderability::SideEffectsOnly : PrefabRenderability::Inert;
-
-    PaperLogger.warn("Vivify prefab '{}': no renderer has a shader this GPU can run -- {}", asset,
-                     verdict == PrefabRenderability::Inert
-                         ? "it will be skipped and the original visual kept"
-                         : "it draws nothing but still emits light/sound, so it is still spawned");
-  }
-
-  _prefabRenderability.emplace(std::move(key), verdict);
-  return verdict;
-}
-
 std::vector<AssignedPrefabInfo*> Runtime::GetValidPrefabInfos(std::vector<AssignedPrefabInfo*> const& infos) {
   std::vector<AssignedPrefabInfo*> result;
   result.reserve(infos.size());
@@ -223,12 +154,7 @@ std::vector<AssignedPrefabInfo*> Runtime::GetValidPrefabInfos(std::vector<Assign
       valid = IsManagedAlive(material);
     } else {
       auto* prefab = GetAssetAs<UnityEngine::GameObject>(info->asset);
-      // A prefab that can neither be seen nor heard is dropped here rather than
-      // spawned and left invisible. The player-visible outcome is unchanged --
-      // the original note or saber stays on screen either way -- but the copy
-      // that nothing would have drawn is never created.
-      valid = IsManagedAlive(prefab) &&
-              EvaluatePrefabRenderability(info->asset) != PrefabRenderability::Inert;
+      valid = IsManagedAlive(prefab);
     }
     if (valid) {
       result.emplace_back(info);
@@ -980,11 +906,8 @@ void Runtime::ReplaceNoteVisuals(GlobalNamespace::NoteController* noteController
 
   bool const canRender = ReplacementCanRender(replacement);
   if (hideOriginal && !canRender) {
-    // EvaluatePrefabRenderability already warned once, by name, for the asset
-    // responsible. Repeating it here would print the same line for every note
-    // in the song.
-    VIVIFY_DEBUG("Vivify note replace: no spawned renderer has a usable shader, keeping the default note "
-                 "visible instead of hiding it behind nothing");
+    PaperLogger.warn("Vivify note replace: no spawned renderer has a usable shader, keeping the default note "
+                     "visible instead of hiding it behind nothing");
     hideOriginal = false;
   }
 

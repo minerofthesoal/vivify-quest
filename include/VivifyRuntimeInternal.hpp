@@ -1,6 +1,5 @@
 #pragma once
 #include <string>
-#include <chrono>
 #include <vector>
 #include <array>
 #include <unordered_map>
@@ -86,8 +85,7 @@ private:
   static void OnCustomEventStatic(GlobalNamespace::BeatmapCallbacksController* callbackController,
                                   CustomJSONData::CustomEventData* customEventData);
   void EnsureBehaviour();
-  // reason ends up verbatim in VivifyReport.txt, so callers say what happened.
-  void ResetRuntime(std::string_view reason = "level ended (quit or finished)");
+  void ResetRuntime();
   float CurrentSongTime();
   void DetectSongRestart();
   float CurrentBpm() const;
@@ -114,17 +112,6 @@ private:
   void PreloadBundle(std::string const& bundlePath);
   void LoadMainBundle();
   void CacheBundleAssets();
-  // True once the watchdog has stood Vivify down for this level.
-  bool SelfDisabled() const { return _selfDisabledThisLevel; }
-  // Formats everything gathered about the current level for VivifyReport.txt.
-  std::string BuildLevelReport(std::string_view outcome) const;
-  void WriteLevelStartReport();
-  void WriteLevelEndReport(std::string_view outcome);
-  // Reports, per bundle, how many shaders can actually draw here and why the
-  // rest cannot -- separating "no Android program was ever compiled" from
-  // "this GPU refuses every subshader", which need completely different fixes.
-  void LogBundleShaderAudit(int seen, int runnable, int noProgram, int deviceRejected,
-                            std::vector<std::string> const& deviceRejectedNames);
   UnityEngine::Object* GetAssetObject(std::string_view assetName) const;
   template <typename T>
   T* GetAssetAs(std::string_view assetName) const {
@@ -138,16 +125,8 @@ private:
   UnityEngine::RenderTextureFormat SupportedRenderTextureFormat(UnityEngine::RenderTextureFormat requested,
                                                                 std::string_view context) const;
   void LogMaterialShader(std::string_view context, std::string_view assetPath, UnityEngine::Material* material) const;
-  // Asset lookup without the miss warning, for searches whose misses are normal.
-  UnityEngine::Object* LookUpAsset(std::string_view assetName) const;
-  UnityEngine::Shader* FindUsableShader(std::string const& shaderName);
-  // Builds the name -> runnable shader index the lookup above depends on.
-  void EnsureGameShaderIndex();
+  UnityEngine::Shader* FindUsableShader(std::string const& shaderName) const;
   UnityEngine::Shader* FindFallbackShader();
-  // Returns a GPU-usable stand-in for a block-compressed texture this device
-  // cannot sample, decoding it once and caching the result.
-  UnityEngine::Texture* ResolveUsableTexture(UnityEngine::Texture* texture);
-  void DecodeUnsupportedBundleTextures();
   void RepairMaterialShader(UnityEngine::Material* material, std::string_view context = {});
   void RepairGameObjectMaterials(UnityEngine::GameObject* gameObject, std::string_view context = {});
   void ApplyStereoKeywords(UnityEngine::Material* material) const;
@@ -274,9 +253,6 @@ private:
   void ClearAssignedPrefabs(std::string_view objectType, std::optional<AssignedPrefabKind> kind = std::nullopt,
                             std::optional<int> saberType = std::nullopt, std::vector<TrackW> const* tracks = nullptr);
   std::vector<AssignedPrefabInfo*> GetValidPrefabInfos(std::vector<AssignedPrefabInfo*> const& infos);
-  // Classifies a replacement prefab asset once and remembers the answer, so a
-  // prefab that cannot draw is not instantiated once per note for a whole song.
-  PrefabRenderability EvaluatePrefabRenderability(std::string_view asset);
   bool ShouldHideOriginal(std::vector<AssignedPrefabInfo*> const& infos) const;
   void DisableOriginalRenderers(UnityEngine::GameObject* gameObject, VisualReplacement& replacement);
   void DisableOriginalRenderers(ArrayW<UnityEngine::Renderer*, Array<UnityEngine::Renderer*>*> const& renderers,
@@ -319,10 +295,6 @@ private:
   std::unordered_map<std::string, UnityEngine::Object*> _assets;
   std::unordered_map<std::string, UnityEngine::Object*> _assetsByName;
   std::unordered_map<std::string, UnityEngine::Shader*> _supportedShadersByName;
-  // Every runnable shader in the process, by name. Rebuilt per level, because
-  // the objects behind it are Unity's to destroy.
-  std::unordered_map<std::string, UnityEngine::Shader*> _gameShadersByName;
-  bool _gameShaderIndexBuilt = false;
   std::unordered_map<CustomJSONData::CustomEventData*, InstantiatePrefabData> _instantiatePrefabs;
   std::unordered_map<std::string, LivePrefab> _livePrefabs;
   std::vector<SyncedObject> _syncedObjects;
@@ -340,7 +312,6 @@ private:
   std::unordered_map<int, SavedGlobalValue> _currentGlobalProperties;
   std::unordered_map<std::string, bool> _currentGlobalKeywords;
   std::unordered_set<UnityEngine::Material*> _repairedMaterials;
-  std::unordered_map<std::string, PrefabRenderability> _prefabRenderability;
   std::unordered_map<UnityEngine::Renderer*, int> _overlayRendererSortingOrders;
   std::unordered_map<std::string, DeclaredTextureData> _declaredTextures;
   std::unordered_map<std::string, SecondaryCameraData> _secondaryCameras;
@@ -389,7 +360,6 @@ private:
   mutable std::unordered_map<UnityEngine::Material*, bool> _blitMaterialValidCache;
   std::unordered_set<CustomJSONData::CustomEventData*> _catchUpAppliedCustomEvents;
   float _lastSongTime = -1.0f;
-  float _lastKnownSongLength = -1.0f;
   float _lastSyncSongTime = -1.0f;
   int _songTimeCacheFrame = -1;
   int _lastUpdateErrorFrame = -1000;
@@ -398,39 +368,6 @@ private:
   bool _loggedUnityPlatformInfo = false;
   bool _pauseMenuActive = false;
   bool _isResetting = false;
-
-  // Watchdog. Vivify does a lot of work on the main thread at level load --
-  // realising every asset in a bundle, decoding block-compressed textures,
-  // repairing shaders -- and any of it running long turns into a frozen game
-  // that has to be force-quit, with no indication of which part was to blame.
-  //
-  // Rather than trust each individual path to stay fast, per-frame work is
-  // timed. A sustained run of frames over budget makes Vivify stand down for
-  // the rest of the level and say so: the map loses its Vivify visuals, which
-  // is bad, but the game keeps running and the log names the phase.
-  bool _selfDisabledThisLevel = false;
-
-  // Everything the on-device report needs. Gathered as the level loads so that
-  // a level which then freezes still has a complete "started" block on disk --
-  // a frozen game never reaches the end-of-level write, so anything only
-  // recorded at the end would be lost exactly when it matters most.
-  std::string _graphicsSummary;
-  std::string _sourceBundleScanText;
-  double _loadMsCacheAssets = 0.0;
-  double _loadMsDecodeTextures = 0.0;
-  double _loadMsRepairShaders = 0.0;
-  double _loadMsTotal = 0.0;
-  int _auditShadersSeen = 0;
-  int _auditShadersRunnable = 0;
-  int _auditShadersNoProgram = 0;
-  int _auditShadersDeviceRejected = 0;
-  std::vector<std::string> _auditRejectedNames;
-  int _texturesDecoded = 0;
-  int _texturesSkipped = 0;
-  bool _levelReportOpen = false;
-  bool _fallbackShaderSearchFailed = false;
-  int _slowFrameStreak = 0;
-  double _worstFrameMs = 0.0;
 
   bool _reduceDebris = false;
   bool _reduceDebrisCached = false;
@@ -454,19 +391,9 @@ private:
   // Materials whose original shader could not run here and were given the
   // generic stand-in. Fine for geometry, never valid for a full-screen blit.
   std::unordered_set<UnityEngine::Material*> _fallbackShadedMaterials;
-  // Original (undecodable) texture -> decoded RGBA32 replacement. nullptr value
-  // means it was tried and could not be decoded, so it is not retried.
-  std::unordered_map<UnityEngine::Texture*, UnityEngine::Texture*> _decodedTextures;
   int _shaderRepairAttempts = 0;
   int _shaderRepairSucceeded = 0;
   int _shaderRepairFailed = 0;
-  // Counted apart from the failures: these are meant to be undrawn, and folding
-  // them into "could not be repaired" hid a rule that was deleting scenery.
-  int _screenEffectsDeclined = 0;
-  // Materials already visited by the texture pass. One material is normally
-  // shared by many renderers across a prefab, and the decode budget is spent in
-  // real milliseconds.
-  std::unordered_set<UnityEngine::Material*> _texturesScannedMaterials;
 
   int _downloadGeneration = 0;
   float _downloadDeadline = -1.0f;

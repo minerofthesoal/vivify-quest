@@ -1,6 +1,4 @@
 #include "VivifyRuntimeInternal.hpp"
-#include <chrono>
-#include <algorithm>
 #include "VivifyComponents.hpp"
 #include "UnityEngine/ParticleSystem.hpp"
 #include "GlobalNamespace/PlayerDataModel.hpp"
@@ -112,24 +110,13 @@ void Runtime::OnCustomEventStatic(GlobalNamespace::BeatmapCallbacksController* c
 }
 
 void Runtime::Update() {
-  // Once the watchdog has stood down, the only per-frame work left is the one
-  // check that can bring us back: a new beatmap clears the flag in ResetRuntime.
-  if (_selfDisabledThisLevel) return;
-
-  // Budget for one frame of Vivify work. Beat Saber renders at 72-90Hz, so a
-  // frame is 11-14ms in total; anything from this mod taking longer than
-  // kSlowFrameMs is already visible as a stutter, and a sustained run of them
-  // is what a player experiences as a freeze.
-  constexpr double kSlowFrameMs = 50.0;
-  constexpr int kSlowFrameStreakLimit = 30;
-  auto const frameStart = std::chrono::steady_clock::now();
 
   try {
     // Runs in the menu too, so a stalled download is not left pending.
     CheckDownloadTimeout();
     UpdateSyncedObjects();
     if (_audioTimeSyncController != nullptr && !UnityEngine::Object::op_Implicit_bool(_audioTimeSyncController)) {
-      ResetRuntime("level ended (quit or finished)");
+      ResetRuntime();
 
       _activeSabers.clear();
       return;
@@ -151,26 +138,6 @@ void Runtime::Update() {
     LogThrottledUpdateError(ex.what());
   } catch (...) {
     LogThrottledUpdateError("non-std exception");
-  }
-
-  double const frameMs =
-      std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - frameStart).count();
-  _worstFrameMs = std::max(_worstFrameMs, frameMs);
-  if (frameMs > kSlowFrameMs) {
-    _slowFrameStreak++;
-    if (_slowFrameStreak == 1) {
-      PaperLogger.warn("Vivify frame took {:.1f}ms, over the {:.0f}ms budget", frameMs, kSlowFrameMs);
-    }
-    if (_slowFrameStreak >= kSlowFrameStreakLimit) {
-      _selfDisabledThisLevel = true;
-      PaperLogger.error(
-          "Vivify has stood down for this level: {} consecutive frames over {:.0f}ms (worst {:.1f}ms). "
-          "The map loses its Vivify visuals, but the game keeps running instead of freezing. "
-          "Please report this log line with the map name.",
-          _slowFrameStreak, kSlowFrameMs, _worstFrameMs);
-    }
-  } else {
-    _slowFrameStreak = 0;
   }
 }
 
@@ -199,13 +166,10 @@ void Runtime::DetectSongRestart() {
   if (_currentBeatmapData == nullptr || _isResetting) return;
   float songTime = CurrentSongTime();
   if (_lastSongTime >= 0.0f && songTime + 0.25f < _lastSongTime) {
-    ResetRuntime("song restarted");
+    ResetRuntime();
     return;
   }
   _lastSongTime = songTime;
-  if (IsManagedAlive(_audioTimeSyncController)) {
-    _lastKnownSongLength = _audioTimeSyncController->get_songLength();
-  }
 }
 
 float Runtime::CurrentBpm() const {
@@ -466,21 +430,7 @@ void Runtime::RefreshIsolationSettings() {
   RefreshCameraComponents(_currentBeatmapData != nullptr && !_isResetting && !_pauseMenuActive);
 }
 
-void Runtime::ResetRuntime(std::string_view reason) {
-  // Written before anything is torn down, while the numbers are still valid.
-  // The song position is included rather than a guess at "quit" vs "beaten":
-  // by the time this runs the AudioTimeSyncController is usually already gone,
-  // so the honest thing is to report how far the song got and let that say.
-  if (_levelReportOpen) {
-    std::string outcome(reason);
-    if (_lastSongTime >= 0.0f) {
-      outcome += fmt::format("  (reached {:.1f}s", _lastSongTime);
-      outcome += _lastKnownSongLength > 0.0f ? fmt::format(" of {:.1f}s)", _lastKnownSongLength)
-                                             : std::string(")");
-    }
-    WriteLevelEndReport(outcome);
-  }
-
+void Runtime::ResetRuntime() {
   VIVIFY_DEBUG("Vivify ResetRuntime: livePrefabs={} preloaded={} synced={} secondaryCameras={} declaredTextures={} assets={}",
                _livePrefabs.size(), _instantiatePrefabs.size(), _syncedObjects.size(),
                _secondaryCameras.size(), _declaredTextures.size(), _assets.size());
@@ -531,18 +481,10 @@ void Runtime::ResetRuntime(std::string_view reason) {
   _currentGlobalProperties.clear();
   _currentGlobalKeywords.clear();
   _repairedMaterials.clear();
-  _prefabRenderability.clear();
   _fallbackShadedMaterials.clear();
-  // A new beatmap gets a fresh chance: the watchdog is per level, not permanent.
-  _selfDisabledThisLevel = false;
-  _slowFrameStreak = 0;
-  _worstFrameMs = 0.0;
-  _decodedTextures.clear();
   _assets.clear();
   _assetsByName.clear();
   _supportedShadersByName.clear();
-  _gameShadersByName.clear();
-  _gameShaderIndexBuilt = false;
   _catchUpAppliedCustomEvents.clear();
   for (auto& [name, dt] : _declaredTextures) ReleaseDeclaredTextureData(dt);
   _declaredTextures.clear();
