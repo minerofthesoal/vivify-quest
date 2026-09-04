@@ -50,4 +50,22 @@ size_t CompressedSizeWithMips(Format format, int width, int height, int mipCount
 bool DecodeToRgba32(Format format, uint8_t const* data, size_t dataSize, int width, int height, int mipCount,
                     std::vector<uint8_t>& out);
 
+// True when every byte of a buffer is zero.
+//
+// This is the shape of the data a texture hands back when its CPU copy is gone:
+// the array is the right length, so nothing downstream can tell it apart from
+// real pixels, and every block in it decodes to opaque black. Checking for it
+// is the difference between "this texture could not be decoded" and a map that
+// renders entirely black.
+bool IsAllZero(uint8_t const* data, size_t size);
+
+// True when a decoded RGBA32 buffer carries nothing that can be seen: either
+// every colour channel is zero, or every pixel is fully transparent.
+//
+// A texture really can be all black, and refusing that one loses nothing --
+// leaving the original in place draws the same thing. Refusing a decode that
+// came out blank, on the other hand, is what stops bad input becoming a black
+// level.
+bool IsBlankRgba32(uint8_t const* rgba, size_t size);
+
 }

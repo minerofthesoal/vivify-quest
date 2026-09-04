@@ -94,6 +94,37 @@ int main() {
     check(ok && out.size() == expected, "8x8 with 4 mips decodes every level");
   }
 
+  // --- refusing data that would decode to a black texture ------------------
+  {
+    std::vector<uint8_t> zeros(64, 0);
+    check(IsAllZero(zeros.data(), zeros.size()), "an all-zero buffer is recognised");
+    zeros[37] = 1;
+    check(!IsAllZero(zeros.data(), zeros.size()), "one non-zero byte is enough to pass");
+    check(IsAllZero(nullptr, 0), "an empty buffer counts as zero");
+
+    // What an all-zero BC1 block actually decodes to, which is the reason the
+    // check above exists: a perfectly valid, perfectly black texture.
+    std::vector<uint8_t> block(8, 0), out;
+    bool ok = DecodeToRgba32(Format::DXT1, block.data(), block.size(), 4, 4, 1, out);
+    check(ok, "an all-zero BC1 block decodes without complaint");
+    check(ok && IsBlankRgba32(out.data(), out.size()), "and the result is recognised as blank");
+
+    std::vector<uint8_t> opaqueBlack(4 * 4, 0);
+    for (size_t i = 3; i < opaqueBlack.size(); i += 4) opaqueBlack[i] = 255;
+    check(IsBlankRgba32(opaqueBlack.data(), opaqueBlack.size()), "opaque black is blank");
+
+    std::vector<uint8_t> transparentColour(4 * 4, 0);
+    for (size_t i = 0; i < transparentColour.size(); i += 4) transparentColour[i] = 200;
+    check(IsBlankRgba32(transparentColour.data(), transparentColour.size()),
+          "fully transparent is blank whatever the colour");
+
+    std::vector<uint8_t> visible(4 * 4, 0);
+    visible[0] = 10;
+    visible[3] = 255;
+    check(!IsBlankRgba32(visible.data(), visible.size()), "one dim opaque pixel is not blank");
+    check(IsBlankRgba32(nullptr, 0), "an empty decode is blank");
+  }
+
   std::printf("\n%s\n", failures ? "FAILURES" : "all decoder tests passed");
   return failures ? 1 : 0;
 }

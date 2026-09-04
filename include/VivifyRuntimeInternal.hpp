@@ -427,6 +427,9 @@ private:
   std::vector<std::string> _auditRejectedNames;
   int _texturesDecoded = 0;
   int _texturesSkipped = 0;
+  // Textures the decoder refused rather than turn into black ones.
+  int _texturesUnreadable = 0;
+  int _texturesBlank = 0;
   bool _levelReportOpen = false;
   bool _fallbackShaderSearchFailed = false;
   int _slowFrameStreak = 0;

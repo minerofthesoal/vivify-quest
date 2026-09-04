@@ -207,4 +207,24 @@ bool DecodeToRgba32(Format format, uint8_t const* data, size_t dataSize, int wid
   return true;
 }
 
+bool IsAllZero(uint8_t const* data, size_t size) {
+  if (data == nullptr || size == 0) return true;
+  for (size_t i = 0; i < size; i++) {
+    if (data[i] != 0) return false;
+  }
+  return true;
+}
+
+bool IsBlankRgba32(uint8_t const* rgba, size_t size) {
+  if (rgba == nullptr || size < kRgbaChannels) return true;
+  bool anyColour = false;
+  bool anyOpacity = false;
+  for (size_t i = 0; i + kRgbaChannels <= size; i += kRgbaChannels) {
+    if (rgba[i] != 0 || rgba[i + 1] != 0 || rgba[i + 2] != 0) anyColour = true;
+    if (rgba[i + 3] != 0) anyOpacity = true;
+    if (anyColour && anyOpacity) return false;
+  }
+  return !(anyColour && anyOpacity);
+}
+
 }

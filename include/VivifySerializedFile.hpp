@@ -164,6 +164,50 @@ struct ShaderObject {
   std::vector<size_t> decompressedLengthsTableOffsets;
 };
 
+// One Texture2D object, as far as making its pixels reachable on device needs.
+//
+// A converted PC bundle's textures are BC1/BC3/BC7, which an Adreno cannot
+// sample. The mod decodes them on the CPU at level load, but that needs the
+// texture's own bytes, and Unity only keeps a CPU copy of a texture whose
+// m_IsReadable is set -- which a map author almost never sets, because on PC
+// nothing needs it. Ask an unreadable texture for its data and what comes back
+// can be an array of the right length full of zeros, which decodes into a
+// perfectly black texture; that is what turned every converted level black.
+//
+// So conversion sets the flag. It is a single serialized bool, in a fixed-size
+// field, so it can be written where it sits without the object changing size
+// and without anything else in the file moving.
+struct TextureObject {
+  int64_t pathID = 0;
+  std::string name;
+
+  int32_t width = 0;
+  int32_t height = 0;
+  int32_t mipCount = 0;
+  int32_t textureFormat = 0;
+  int32_t completeImageSize = 0;
+
+  // Where the pixels live. A bundle usually keeps them in a companion .resS
+  // node and references them through m_StreamData; `imageDataSize` is then 0.
+  size_t imageDataFileOffset = 0;
+  size_t imageDataSize = 0;
+  uint32_t streamDataSize = 0;
+  bool streamed = false;
+
+  // The m_IsReadable byte: where it is, relative to the buffer the file was
+  // parsed from, and what it currently says.
+  bool isReadablePresent = false;
+  size_t isReadableFileOffset = 0;
+  bool isReadable = false;
+
+  size_t bodyFileOffset = 0;
+  size_t bodySize = 0;
+};
+
+// True for the block-compressed formats no Quest GPU can sample, which are the
+// only ones worth making readable: an ETC2 or RGBA32 texture already works.
+bool TextureFormatNeedsDecodingOnQuest(int32_t unityTextureFormat);
+
 struct DecodeResult {
   bool ok = false;
   std::vector<ShaderSubProgram> programs;
@@ -290,7 +334,9 @@ struct FileReport {
   bool typeTreePresent = false;
   int32_t objectCount = 0;
   int32_t shaderObjectCount = 0;
+  int32_t textureObjectCount = 0;
   std::vector<ShaderObject> shaders;
+  std::vector<TextureObject> textures;
   std::string unityVersion;
   std::string message;
 };

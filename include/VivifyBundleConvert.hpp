@@ -23,9 +23,13 @@
 //   VivifyDxbc) and written back into the bundle. A shader using anything
 //   outside the translated subset is left as it was and still falls to
 //   Vivify's stand-in path (see Runtime::RepairMaterialShader) at load time.
-//   Block-compressed textures still do NOT come through: BC/DXT data is not
-//   something an Adreno GPU can consume, and that conversion has not been
-//   written.
+//   Block-compressed textures are not recompressed -- BC/DXT data is not
+//   something an Adreno GPU can consume, and re-encoding it to ETC2 or ASTC on
+//   a headset is not realistic. Instead each such texture has its m_IsReadable
+//   flag set, which is what keeps its CPU copy alive after load so the mod can
+//   decode it to RGBA32 at level load (see Runtime::ResolveUsableTexture).
+//   Without the flag Unity drops that copy and the decoder is handed an empty
+//   buffer, which decodes to solid black.
 //
 // The implementation is deliberately free of Unity/il2cpp dependencies so it
 // can be unit-tested on a host compiler.
@@ -145,6 +149,12 @@ struct ShaderConversion {
   int shadersLeftAlone = 0;   // already runnable here, or nothing to translate
   int shadersRefused = 0;     // used something outside the translated subset
   int programsTranslated = 0;
+  // Block-compressed textures seen, and how many had their m_IsReadable flag
+  // set so the mod can decode them on device. A texture that is already
+  // readable, or in a format a Quest can sample, is not counted as marked.
+  int texturesSeen = 0;
+  int texturesMarkedReadable = 0;
+  int texturesStreamed = 0;
   uint64_t outputBytes = 0;
   // The first few reasons a shader was refused, for the log. Bounded on
   // purpose: a bundle with two hundred unsupported shaders would otherwise put

@@ -33,6 +33,105 @@ port from scratch — see Credits below.
   - Full settings-menu parity: every toggle the runtime already had a config
     key for is now actually exposed in the in-game settings UI.
 
+## 0.9.14 — giving the decoder something to decode
+
+0.9.13 stops a texture whose pixels are gone from being turned into a black one.
+It does not get the pixels back, and a texture left undecoded still draws
+untextured — 0.7's "some levels are white" defect, which is where this port was
+before any of this existed.
+
+The pixels are gone because Unity drops a texture's CPU copy after upload unless
+its `m_IsReadable` flag is set, and a map author has no reason to set it: on PC
+the GPU samples the BC data directly and nothing ever needs a CPU copy. On a
+Quest nothing can sample it, so the CPU copy is the only route there is.
+
+Conversion sets the flag. `m_IsReadable` is a single serialized byte in a
+fixed-width field, so it is written where it sits: the object does not change
+size, nothing after it moves, and it happens before the shader rewrite so a
+bundle whose shaders all refuse still comes out with usable textures.
+
+Finding that byte is the part worth being careful about. Unity has moved
+Texture2D's fields around repeatedly — `m_MipsStripped`,
+`m_IsAlphaChannelOptional` and `m_IgnoreMipmapLimit` all arrived in different
+versions — so nothing here is positional. The parser walks the object through
+the file's own type tree and takes each field by the name the tree gives it,
+skipping anything it does not recognise to stay in step. It writes only a byte
+the tree calls a one-byte bool and that currently reads as 0 or 1; anything else
+means the field was not where the tree said, and the texture is left alone.
+
+Recompressing to ETC2 or ASTC would be the other way to do this, and it is not
+realistic on a headset: it is an encode, not a decode, and it would have to
+happen for every texture in the map. Inlining the decoded RGBA32 into the bundle
+instead is worse — RGBA32 is four to eight times the size of the BC data, which
+turns a 60MB bundle into a 400MB one. Keeping the BC bytes in the bundle and
+decoding at load costs the RAM of the textures a map actually uses, and nothing
+on disk.
+
+The conversion cache version goes to 4, so bundles converted by any earlier
+build are redone rather than reused. `tools/bundleconvert/` gained a Texture2D
+fixture and nine cases: each BC format marked, an RGBA32 texture left alone, an
+already-readable one counted but not rewritten, a streamed one reported as
+streamed, several textures in one file, SerializedFile v22, the flag surviving
+the shader rebuild beside it, and the flag read back out of the converted bundle
+rather than trusted from a counter. 54 checks, green under ASan/UBSan.
+
+If a map's textures still come through unreadable after this, the level report
+says so by count, and that is the number to bring back.
+
+## 0.9.13 — why every converted level went black
+
+0.7 rendered converted maps. Everything from 0.8.0 onwards rendered them black,
+with only the particles still visible. The whole functional difference between
+those two builds is one feature: the on-device BC/DXT texture decode added in
+0.8.0. Nothing else changed — 0.8.1 through 0.8.3 are a diagnostic log line and
+two build fixes.
+
+Here is how a decoder makes a level black.
+
+A Quest's Adreno GPU cannot sample the BC1/BC3/BC7 textures a PC-built
+AssetBundle carries, so 0.8.0 decoded them to RGBA32 on the CPU using the
+texture's own bytes, fetched with `GetRawTextureData`. But a texture loaded from
+an AssetBundle only still *has* its bytes if the map author ticked Read/Write
+Enabled in Unity, which almost nobody does: the pixels go to the GPU and the CPU
+copy is dropped. Ask that texture for its data anyway and you do not necessarily
+get an error. You can get an array of exactly the right length with nothing in
+it.
+
+That array decodes. It decodes *correctly*: an all-zero BC1 block is a valid
+block and it means opaque black. So the pass did precisely what it was written
+to do, on data that was not there, and handed every material in the map a black
+texture in place of one that had merely been unsampleable. An unsampleable
+texture reads as flat white, which is why 0.7's defects were "some levels are
+white, and the blocks are white" — and why 0.8.0 turned those same levels black.
+The particles survived because their materials are untextured, so there was
+nothing for the decoder to replace.
+
+The decoder was never wrong; its test suite passes and still does. What was
+missing was any check that the bytes it was handed were real. There are three
+now, and every one of them leaves the texture exactly as it was:
+
+- the texture must report `isReadable`, or there is no CPU copy to decode;
+- the raw bytes must not be uniformly zero, which is the signature of a copy
+  that has already been dropped;
+- the decoded result must have something visible in it — some colour and some
+  opacity.
+
+A texture that fails any of them draws untextured, the way it did in 0.7 and the
+way it did before this pass existed. `tools/texturedecode/` gained the cases
+that pin this down, including the one that matters: an all-zero BC1 block
+decoding without complaint into a texture that is recognised as blank.
+
+The session log now says how many textures each level refused and why, and the
+same two counts are in the report file. That is the number to read next: a map
+whose textures are all "not readable on CPU" is one whose textures have to be
+made available at conversion time instead, which is the next piece of work
+rather than something the device can fix on its own.
+
+Everything else in this build stays as it was. The stand-in shader ordering, the
+shader index that resolves a map's shaders to the real ones, the DXBC translator
+and the conversion cache versioning are all unchanged — the only thing 0.7 did
+better was not turning the textures black, and that is what this restores.
+
 ## 0.5.0 — visibility fixes and the on-device bundle converter
 
 Four defects, all found by reading the code rather than by reproducing them
