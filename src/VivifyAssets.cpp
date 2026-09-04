@@ -987,6 +987,8 @@ std::string Runtime::BuildLevelReport(std::string_view outcome) const {
   line("Textures");
   line(fmt::format("  decoded:            {}", _texturesDecoded));
   line(fmt::format("  skipped (over time budget): {}", _texturesSkipped));
+  line(fmt::format("  refused, not readable on CPU: {}", _texturesUnreadable));
+  line(fmt::format("  refused, decoded blank:       {}", _texturesBlank));
 
   if (!_sourceBundleScanText.empty()) {
     line("");
@@ -1686,9 +1688,26 @@ void Runtime::RefreshLoadedMaterialStereoKeywords() {
 // colour. Decoding on the CPU costs memory (BC1 is 4 bits per pixel, RGBA32 is
 // 32) but produces something that actually renders.
 //
-// Requires the source texture's raw bytes to still be available; a texture
-// imported without read/write enabled may have had its CPU copy dropped, in
-// which case there is nothing to decode and the original is returned unchanged.
+// EVERY refusal path here returns the texture unchanged, and that is the whole
+// design. This pass is where converted levels turned black.
+//
+// Decoding needs the source texture's own bytes, and a texture loaded from an
+// AssetBundle only still has them if the map author ticked Read/Write Enabled,
+// which almost nobody does: the pixels are uploaded to the GPU and the CPU copy
+// is dropped. Ask such a texture for its data anyway and Unity does not
+// necessarily fail -- it can hand back an array of exactly the right length
+// with nothing in it. That decodes perfectly: an all-zero BC1 block is a valid
+// block, and it means opaque black. So every material in the map was given a
+// black texture, in place of one that was merely unsampleable, and the level
+// went from washed-out to pitch black with only the untextured particles left
+// showing. Textures were the one thing that changed between the last build that
+// rendered (0.7.2) and the first that did not (0.8.0).
+//
+// Hence three gates before anything is swapped in: the texture must say its
+// pixels are readable, the bytes must not be uniformly zero, and the decoded
+// result must have something visible in it. A texture that fails any of them is
+// left exactly as it was -- unsampleable, so it draws as flat white, which is
+// how 0.7 behaved and is what the map looked like before this pass existed.
 UnityEngine::Texture* Runtime::ResolveUsableTexture(UnityEngine::Texture* texture) {
   if (!IsAlive(texture)) return texture;
   if (auto cached = _decodedTextures.find(texture); cached != _decodedTextures.end()) {
@@ -1716,6 +1735,19 @@ UnityEngine::Texture* Runtime::ResolveUsableTexture(UnityEngine::Texture* textur
   int const height = source->get_height();
   int const mipCount = std::max(1, source->get_mipmapCount());
 
+  // Gate one. A texture that reports its pixels as unreadable has no CPU copy
+  // to decode, and whatever GetRawTextureData answers with is not its contents.
+  if (!source->get_isReadable()) {
+    _texturesUnreadable++;
+    if (_texturesUnreadable <= 8) {
+      PaperLogger.warn("Vivify texture '{}' ({}, {}x{}): not readable on the CPU, so there are no bytes to "
+                       "decode. Left as it is -- it draws untextured rather than black.",
+                       name, TextureDecode::FormatName(format), width, height);
+    }
+    _decodedTextures[texture] = nullptr;
+    return texture;
+  }
+
   ArrayW<uint8_t, Array<uint8_t>*> raw = nullptr;
   try {
     raw = source->GetRawTextureData();
@@ -1730,11 +1762,37 @@ UnityEngine::Texture* Runtime::ResolveUsableTexture(UnityEngine::Texture* textur
     return texture;
   }
 
+  // Gate two. Right length, no content: the signature of a CPU copy that was
+  // already dropped. Decoding it would succeed and produce solid black.
+  if (TextureDecode::IsAllZero(raw.begin(), static_cast<size_t>(raw.size()))) {
+    _texturesBlank++;
+    if (_texturesBlank <= 8) {
+      PaperLogger.warn("Vivify texture '{}' ({}, {}x{}): {} byte(s) of raw data, all zero -- the pixels are "
+                       "gone even though the texture says it is readable. Left as it is.",
+                       name, TextureDecode::FormatName(format), width, height, raw.size());
+    }
+    _decodedTextures[texture] = nullptr;
+    return texture;
+  }
+
   std::vector<uint8_t> decoded;
   if (!TextureDecode::DecodeToRgba32(format, raw.begin(), static_cast<size_t>(raw.size()), width, height, mipCount,
                                      decoded)) {
     PaperLogger.warn("Vivify texture '{}' ({}, {}x{}, {} mip(s)): {} byte(s) of data did not decode",
                      name, TextureDecode::FormatName(format), width, height, mipCount, raw.size());
+    _decodedTextures[texture] = nullptr;
+    return texture;
+  }
+
+  // Gate three. The decode worked on data that was not all zero and still came
+  // out with no colour, or nothing but transparency. Whatever that is, drawing
+  // it is not an improvement on drawing the original.
+  if (TextureDecode::IsBlankRgba32(decoded.data(), decoded.size())) {
+    _texturesBlank++;
+    if (_texturesBlank <= 8) {
+      PaperLogger.warn("Vivify texture '{}' ({}, {}x{}): decoded to nothing visible, so the original is kept",
+                       name, TextureDecode::FormatName(format), width, height);
+    }
     _decodedTextures[texture] = nullptr;
     return texture;
   }
@@ -1765,6 +1823,8 @@ UnityEngine::Texture* Runtime::ResolveUsableTexture(UnityEngine::Texture* textur
 void Runtime::DecodeUnsupportedBundleTextures() {
   int swapped = 0;
   int skipped = 0;
+  _texturesUnreadable = 0;
+  _texturesBlank = 0;
   _texturesScannedMaterials.clear();
 
   // Block-compressed decoding is real CPU work on the main thread: a 2048x2048
@@ -1849,8 +1909,16 @@ void Runtime::DecodeUnsupportedBundleTextures() {
   // wrong place. "scanned 0" is a symptom; silence is not.
   PaperLogger.info(
       "Vivify texture decode: scanned {} material(s), replaced {} unsupported texture "
-      "reference(s) in {:.0f}ms, skipped {} over budget",
-      _texturesScannedMaterials.size(), swapped, elapsedMs(), skipped);
+      "reference(s) in {:.0f}ms, skipped {} over budget, refused {} unreadable and {} blank",
+      _texturesScannedMaterials.size(), swapped, elapsedMs(), skipped, _texturesUnreadable,
+      _texturesBlank);
+  if (_texturesUnreadable > 0 || _texturesBlank > 0) {
+    PaperLogger.warn(
+        "Vivify left {} texture(s) undecoded because their pixels are not available on the CPU. Those "
+        "materials draw untextured, which is the look this port had before decoding existed -- decoding "
+        "them anyway is what made converted levels black.",
+        _texturesUnreadable + _texturesBlank);
+  }
   if (skipped > 0) {
     PaperLogger.warn(
         "Vivify stopped decoding textures after {:.0f}ms and left {} reference(s) on their original, "
