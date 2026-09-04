@@ -32,7 +32,11 @@ namespace {
 //      container at offset zero, where Unity's own program header sits, so it
 //      translated nothing at all and its caches are worth no more than a
 //      version 1 one
-constexpr int kBundleConversionVersion = 3;
+//   4  the same, plus marking block-compressed textures readable so their
+//      pixels survive load and can be decoded on device. A version 3 cache has
+//      textures whose CPU copy Unity drops, which is a level that renders
+//      untextured
+constexpr int kBundleConversionVersion = 4;
 
 std::string ConversionMarkerPath(std::string const& destPath) {
   return destPath + ".version";
@@ -119,6 +123,13 @@ BundleConversionOutcome RunBundleConversion(std::string const& source, std::stri
   if (conversion.shadersRefused > static_cast<int>(conversion.refusals.size())) {
     PaperLogger.info("Vivify shader translation left {} further shader(s) as they were",
                      conversion.shadersRefused - static_cast<int>(conversion.refusals.size()));
+  }
+  if (conversion.texturesSeen > 0) {
+    PaperLogger.info(
+        "Vivify conversion marked {} of {} block-compressed texture(s) readable ({} keep their pixels "
+        "in a companion stream). A texture that is not readable loses its pixels at load, and decoding "
+        "it then produces solid black.",
+        conversion.texturesMarkedReadable, conversion.texturesSeen, conversion.texturesStreamed);
   }
   return {conversion.status, conversion.message};
 }

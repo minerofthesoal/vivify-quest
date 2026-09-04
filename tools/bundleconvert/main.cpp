@@ -28,10 +28,11 @@ int main(int argc, char** argv) {
   if (shaders) {
     ShaderConversion c = ConvertShadersToGles(src, dst);
     std::printf("status=%s\nmessage=%s\nseen=%d translated=%d leftAlone=%d refused=%d "
-                "programs=%d outBytes=%llu\n",
+                "programs=%d outBytes=%llu\ntexSeen=%d texReadable=%d texStreamed=%d\n",
                 std::string(StatusText(c.status)).c_str(), c.message.c_str(), c.shadersSeen,
                 c.shadersTranslated, c.shadersLeftAlone, c.shadersRefused, c.programsTranslated,
-                (unsigned long long)c.outputBytes);
+                (unsigned long long)c.outputBytes, c.texturesSeen, c.texturesMarkedReadable,
+                c.texturesStreamed);
     for (auto const& refusal : c.refusals) std::printf("refusal=%s\n", refusal.c_str());
     return c.ok() ? 0 : 1;
   }

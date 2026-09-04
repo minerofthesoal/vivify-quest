@@ -1187,7 +1187,32 @@ ShaderConversion ConvertShadersToGles(std::string const& sourcePath,
     size_t const nodeSize = static_cast<size_t>(nodes[index].size);
 
     auto file = SerializedFileParse::InspectSerializedFile(nodeData, nodeSize);
-    if (!file.isSerializedFile || file.shaders.empty()) continue;
+    if (!file.isSerializedFile) continue;
+
+    // Make the block-compressed textures readable before anything moves.
+    //
+    // m_IsReadable is a single serialized byte in a fixed-width field, so it is
+    // written where it sits: the object does not change size, nothing after it
+    // moves, and a bundle whose shaders all refuse still comes out with usable
+    // textures. Without the flag Unity drops each texture's CPU copy after
+    // upload, and the mod's on-device decoder is left asking for bytes that are
+    // no longer there -- which is how converted levels came to render black.
+    for (auto const& texture : file.textures) {
+      if (!SerializedFileParse::TextureFormatNeedsDecodingOnQuest(texture.textureFormat)) continue;
+      conversion.texturesSeen++;
+      if (texture.streamed) conversion.texturesStreamed++;
+      if (!texture.isReadablePresent || texture.isReadable) continue;
+      size_t const at = nodes[index].offset + texture.isReadableFileOffset;
+      if (at >= data.size()) continue;
+      // Only a byte that currently reads as a bool is touched. Anything else
+      // means the field was not where the type tree said it was, and writing
+      // over it would corrupt the texture.
+      if (data[at] > 1) continue;
+      data[at] = 1;
+      conversion.texturesMarkedReadable++;
+    }
+
+    if (file.shaders.empty()) continue;
 
     std::vector<SerializedFileParse::ObjectEdit> edits;
     for (auto const& shader : file.shaders) {
@@ -1260,7 +1285,7 @@ ShaderConversion ConvertShadersToGles(std::string const& sourcePath,
   // Nothing to retarget and nothing translated means the bundle already runs
   // here; writing a byte-for-byte copy of it would only cost storage on the
   // headset and hide that fact from the caller.
-  if (retargeted == 0 && conversion.shadersTranslated == 0) {
+  if (retargeted == 0 && conversion.shadersTranslated == 0 && conversion.texturesMarkedReadable == 0) {
     conversion.status = Status::AlreadyAndroid;
     conversion.message =
         conversion.shadersRefused > 0
@@ -1283,7 +1308,11 @@ ShaderConversion ConvertShadersToGles(std::string const& sourcePath,
                        std::to_string(conversion.programsTranslated) + " program(s)) across " +
                        std::to_string(filesRewritten) + " serialized file(s); " +
                        std::to_string(conversion.shadersLeftAlone) + " already ran here, " +
-                       std::to_string(conversion.shadersRefused) + " left as they were";
+                       std::to_string(conversion.shadersRefused) + " left as they were; " +
+                       std::to_string(conversion.texturesMarkedReadable) + " of " +
+                       std::to_string(conversion.texturesSeen) +
+                       " block-compressed texture(s) marked readable (" +
+                       std::to_string(conversion.texturesStreamed) + " streamed)";
   return conversion;
 }
 

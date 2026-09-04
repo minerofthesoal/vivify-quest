@@ -266,8 +266,9 @@ def dxbc_untranslatable():
     return dx.unity_program([isgn, osgn, dx.shex_chunk([code], stage=1)])
 
 
-def shader_bundle(path, shaders, sf_version=21, target=19):
-    sf = mkshader.serialized_file_with_shaders(shaders, sf_version=sf_version, target=target)
+def shader_bundle(path, shaders, sf_version=21, target=19, textures=None):
+    sf = mkshader.serialized_file_with_shaders(shaders, sf_version=sf_version, target=target,
+                                               textures=textures)
     return build(path, sf_bytes=[sf], with_resource=False)
 
 
@@ -382,6 +383,100 @@ def expect_mixed(proc, fields, refusals, dst):
 shader_case("a bundle with one good and one bad shader keeps both and stays loadable",
             expect_mixed,
             [("Custom/Good", [4], one_program), ("Custom/Bad", [4], untranslatable)])
+
+# --- making a bundle's block-compressed textures decodable on device -------
+#
+# The mod decodes BC textures to RGBA32 at level load, and it can only do that
+# while the texture still has a CPU copy -- which Unity keeps only when
+# m_IsReadable is set. Conversion sets it. A texture that never gets the flag
+# loses its pixels at load, and decoding what is left produces solid black,
+# which is what every converted level looked like from 0.8.0 to 0.9.12.
+def texture_case(name, specs, check, **kw):
+    global fails, cases
+    cases += 1
+    src = os.path.join(TMP, "tex_src.vivify")
+    dst = os.path.join(TMP, "tex_dst.vivify")
+    shader_bundle(src, [("Custom/Test", [4], one_program)], textures=specs, **kw)
+    proc, fields, refusals = run_shaders(src, dst)
+    problem = check(proc, fields, refusals, dst)
+    if problem:
+        print(f"FAIL {name}: {problem}\n{proc.stdout}{proc.stderr}")
+        fails += 1
+    else:
+        print(f"ok   {name}")
+
+
+def expect_textures(seen, readable, streamed=0):
+    def check(proc, fields, refusals, dst):
+        if fields.get("status") != "converted":
+            return f"status '{fields.get('status')}'"
+        got = (fields.get("texSeen"), fields.get("texReadable"), fields.get("texStreamed"))
+        want = (str(seen), str(readable), str(streamed))
+        if got != want:
+            return f"seen/readable/streamed {got}, wanted {want}"
+        try:
+            read_converted(dst)
+        except Exception as e:
+            return f"converted bundle did not parse: {e}"
+        return None
+    return check
+
+
+texture_case("a BC1 texture is marked readable",
+             [dict(name="brick", texture_format=10, image_data=bytes(8))],
+             expect_textures(1, 1))
+texture_case("a BC7 texture is marked readable",
+             [dict(name="sky", texture_format=25, image_data=bytes(16))],
+             expect_textures(1, 1))
+texture_case("an RGBA32 texture is left alone -- the GPU can already sample it",
+             [dict(name="plain", texture_format=4, image_data=bytes(64))],
+             expect_textures(0, 0))
+texture_case("a texture that is already readable is counted but not rewritten",
+             [dict(name="brick", texture_format=10, is_readable=True, image_data=bytes(8))],
+             expect_textures(1, 0))
+texture_case("a streamed texture is marked readable and reported as streamed",
+             [dict(name="streamed", texture_format=12, stream_size=4096,
+                   stream_path="archive:/x/x.resS")],
+             expect_textures(1, 1, streamed=1))
+texture_case("several textures are all found, whatever their formats",
+             [dict(name="a", texture_format=10, image_data=bytes(8)),
+              dict(name="b", texture_format=4, image_data=bytes(64)),
+              dict(name="c", texture_format=12, image_data=bytes(16)),
+              dict(name="d", texture_format=27, is_readable=True, image_data=bytes(16))],
+             expect_textures(3, 2))
+texture_case("the texture pass works on SerializedFile v22",
+             [dict(name="brick", texture_format=10, image_data=bytes(8))],
+             expect_textures(1, 1), sf_version=22)
+
+
+# The flag has to survive the rebuild that resizes the shader beside it: the
+# byte is written into the data before RewriteSerializedFile relays the file
+# around a longer shader body, and a relay that dropped it would leave a bundle
+# that converts "successfully" and still renders black.
+cases += 1
+src = os.path.join(TMP, "tex_src.vivify")
+dst = os.path.join(TMP, "tex_dst.vivify")
+shader_bundle(src, [("Custom/Test", [4], one_program)],
+              textures=[dict(name="brick", texture_format=10, image_data=bytes(8))])
+proc, fields, refusals = run_shaders(src, dst)
+if fields.get("translated") == "1" and fields.get("texReadable") == "1" and b"brick" in open(dst, "rb").read():
+    print("ok   a texture keeps its flag through the shader rebuild beside it")
+else:
+    print("FAIL the texture pass and the shader rewrite do not survive each other:\n" + proc.stdout)
+    fails += 1
+
+# Reading the flag back out of the converted bundle, rather than trusting the
+# counter that says it was written: converting the output again finds the
+# texture and has nothing left to do to it.
+cases += 1
+again = os.path.join(TMP, "tex_dst2.vivify")
+proc2, fields2, _ = run_shaders(dst, again)
+if fields2.get("texSeen") == "1" and fields2.get("texReadable") == "0":
+    print("ok   the flag is really in the converted bundle, not just in the counter")
+else:
+    print("FAIL the converted bundle's texture is not readable:\n" + proc2.stdout)
+    fails += 1
+
 
 cases += 1
 p = subprocess.run([CONV, "--shaders", bad, os.path.join(TMP, "sh_bad.out")],

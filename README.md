@@ -33,6 +33,51 @@ port from scratch — see Credits below.
   - Full settings-menu parity: every toggle the runtime already had a config
     key for is now actually exposed in the in-game settings UI.
 
+## 0.9.14 — giving the decoder something to decode
+
+0.9.13 stops a texture whose pixels are gone from being turned into a black one.
+It does not get the pixels back, and a texture left undecoded still draws
+untextured — 0.7's "some levels are white" defect, which is where this port was
+before any of this existed.
+
+The pixels are gone because Unity drops a texture's CPU copy after upload unless
+its `m_IsReadable` flag is set, and a map author has no reason to set it: on PC
+the GPU samples the BC data directly and nothing ever needs a CPU copy. On a
+Quest nothing can sample it, so the CPU copy is the only route there is.
+
+Conversion sets the flag. `m_IsReadable` is a single serialized byte in a
+fixed-width field, so it is written where it sits: the object does not change
+size, nothing after it moves, and it happens before the shader rewrite so a
+bundle whose shaders all refuse still comes out with usable textures.
+
+Finding that byte is the part worth being careful about. Unity has moved
+Texture2D's fields around repeatedly — `m_MipsStripped`,
+`m_IsAlphaChannelOptional` and `m_IgnoreMipmapLimit` all arrived in different
+versions — so nothing here is positional. The parser walks the object through
+the file's own type tree and takes each field by the name the tree gives it,
+skipping anything it does not recognise to stay in step. It writes only a byte
+the tree calls a one-byte bool and that currently reads as 0 or 1; anything else
+means the field was not where the tree said, and the texture is left alone.
+
+Recompressing to ETC2 or ASTC would be the other way to do this, and it is not
+realistic on a headset: it is an encode, not a decode, and it would have to
+happen for every texture in the map. Inlining the decoded RGBA32 into the bundle
+instead is worse — RGBA32 is four to eight times the size of the BC data, which
+turns a 60MB bundle into a 400MB one. Keeping the BC bytes in the bundle and
+decoding at load costs the RAM of the textures a map actually uses, and nothing
+on disk.
+
+The conversion cache version goes to 4, so bundles converted by any earlier
+build are redone rather than reused. `tools/bundleconvert/` gained a Texture2D
+fixture and nine cases: each BC format marked, an RGBA32 texture left alone, an
+already-readable one counted but not rewritten, a streamed one reported as
+streamed, several textures in one file, SerializedFile v22, the flag surviving
+the shader rebuild beside it, and the flag read back out of the converted bundle
+rather than trusted from a counter. 54 checks, green under ASan/UBSan.
+
+If a map's textures still come through unreadable after this, the level report
+says so by count, and that is the number to bring back.
+
 ## 0.9.13 — why every converted level went black
 
 0.7 rendered converted maps. Everything from 0.8.0 onwards rendered them black,

@@ -8,6 +8,7 @@ namespace {
 
 // Unity ClassID for UnityEngine.Shader.
 constexpr int32_t kClassIdShader = 48;
+constexpr int32_t kClassIdTexture2D = 28;
 
 // Type-tree node flags. Bit 0 of typeFlags marks a node whose children are the
 // [size, data] pair of an array; bit 14 of metaFlag requests 4-byte alignment
@@ -374,7 +375,117 @@ ShaderObject ReadShaderObject(uint8_t const* data, size_t size, size_t fileOffse
   return shader;
 }
 
+// Reads a Texture2D object: walks its top-level fields in order, keeping the
+// handful that decide whether its pixels can be reached on device.
+//
+// Nothing here is positional. Unity has moved Texture2D's fields around several
+// times -- m_MipsStripped, m_IsAlphaChannelOptional and m_IgnoreMipmapLimit all
+// arrived in different versions -- so every field is found by the name the
+// file's own type tree gives it, and anything unrecognised is walked past to
+// stay in step with the byte stream.
+TextureObject ReadTextureObject(uint8_t const* data, size_t size, size_t fileOffset,
+                                SerializedTypeInfo const& type) {
+  TextureObject texture;
+  if (type.nodes.empty()) return texture;
+  texture.bodyFileOffset = fileOffset;
+  texture.bodySize = size;
+
+  auto readI32 = [&](size_t at) -> int32_t {
+    if (at + 4 > size) return 0;
+    uint32_t value = 0;
+    std::memcpy(&value, data + at, 4);
+    return static_cast<int32_t>(value);
+  };
+
+  Reader reader(data, size);
+  for (size_t child : ChildIndices(type.nodes, 0)) {
+    if (!reader.ok()) break;
+    std::string const name = NodeName(type, type.nodes[child]);
+    size_t const before = reader.position();
+
+    if (name == "m_StreamData") {
+      // Walked child by child rather than in one step, because which of them is
+      // "size" and which is "path" is the whole question: a texture whose
+      // pixels live in a companion .resS node has nothing inline to decode.
+      for (size_t sub : ChildIndices(type.nodes, child)) {
+        if (!reader.ok()) break;
+        std::string const subName = NodeName(type, type.nodes[sub]);
+        size_t const subBefore = reader.position();
+        WalkNode(reader, type, sub, nullptr, 2);
+        if (reader.position() <= subBefore) continue;
+        if (subName == "size") {
+          texture.streamDataSize = static_cast<uint32_t>(readI32(subBefore));
+        } else if (subName == "path") {
+          // A string is a length-prefixed byte array; a non-empty one means the
+          // pixels are somewhere else.
+          if (readI32(subBefore) > 0) texture.streamed = true;
+        }
+      }
+      // WalkNode would have applied this after its children; walking them by
+      // hand means applying it by hand.
+      if ((type.nodes[child].metaFlag & kMetaFlagAlignBytes) != 0) reader.align4();
+      continue;
+    }
+
+    if (name == "image data") {
+      FieldCapture capture;
+      capture.wantBytes = true;
+      WalkNode(reader, type, child, &capture, 1);
+      if (capture.sawBytes) {
+        texture.imageDataFileOffset = fileOffset + capture.byteOffset;
+        texture.imageDataSize = capture.byteCount;
+      }
+      continue;
+    }
+
+    WalkNode(reader, type, child, nullptr, 1);
+    if (reader.position() <= before) continue;
+
+    if (name == "m_Name") {
+      uint32_t const length = static_cast<uint32_t>(readI32(before));
+      if (length > 0 && length <= 256 && before + 4 + length <= size) {
+        texture.name.assign(reinterpret_cast<char const*>(data + before + 4), length);
+      }
+    } else if (name == "m_Width") {
+      texture.width = readI32(before);
+    } else if (name == "m_Height") {
+      texture.height = readI32(before);
+    } else if (name == "m_MipCount") {
+      texture.mipCount = readI32(before);
+    } else if (name == "m_TextureFormat") {
+      texture.textureFormat = readI32(before);
+    } else if (name == "m_CompleteImageSize") {
+      texture.completeImageSize = readI32(before);
+    } else if (name == "m_IsReadable") {
+      // Only a genuine one-byte bool is claimed. A field of any other width
+      // under this name is something this code does not understand, and writing
+      // to it would corrupt the object.
+      if (type.nodes[child].byteSize == 1 && before < size) {
+        texture.isReadablePresent = true;
+        texture.isReadableFileOffset = fileOffset + before;
+        texture.isReadable = data[before] != 0;
+      }
+    }
+  }
+  return texture;
+}
+
 }  // namespace
+
+bool TextureFormatNeedsDecodingOnQuest(int32_t unityTextureFormat) {
+  switch (unityTextureFormat) {
+    case 10:  // DXT1 / BC1
+    case 11:  // DXT3
+    case 12:  // DXT5 / BC3
+    case 24:  // BC6H
+    case 25:  // BC7
+    case 26:  // BC4
+    case 27:  // BC5
+      return true;
+    default:
+      return false;
+  }
+}
 
 std::string_view ShaderPlatformName(int32_t platform) {
   switch (platform) {
@@ -1224,16 +1335,26 @@ FileReport InspectSerializedFile(uint8_t const* data, size_t size) {
   for (auto const& object : layout.objects) {
     if (object.typeIndex < 0 || static_cast<size_t>(object.typeIndex) >= layout.types.size()) continue;
     SerializedTypeInfo const& type = layout.types[static_cast<size_t>(object.typeIndex)];
-    if (type.classID != kClassIdShader) continue;
-    report.shaderObjectCount++;
+    bool const isShader = type.classID == kClassIdShader;
+    bool const isTexture = type.classID == kClassIdTexture2D;
+    if (!isShader && !isTexture) continue;
+    if (isShader) report.shaderObjectCount++;
+    if (isTexture) report.textureObjectCount++;
     if (!layout.typeTreePresent || type.nodes.empty()) continue;
 
     uint64_t const start = static_cast<uint64_t>(object.byteStart) + layout.dataOffset;
     if (start >= size || object.byteSize > size - start) continue;
-    ShaderObject shader =
-        ReadShaderObject(data + start, object.byteSize, static_cast<size_t>(start), type);
-    shader.pathID = object.pathID;
-    report.shaders.push_back(std::move(shader));
+    if (isShader) {
+      ShaderObject shader =
+          ReadShaderObject(data + start, object.byteSize, static_cast<size_t>(start), type);
+      shader.pathID = object.pathID;
+      report.shaders.push_back(std::move(shader));
+    } else {
+      TextureObject texture =
+          ReadTextureObject(data + start, object.byteSize, static_cast<size_t>(start), type);
+      texture.pathID = object.pathID;
+      report.textures.push_back(std::move(texture));
+    }
   }
 
   if (!layout.typeTreePresent && report.shaderObjectCount > 0) {
